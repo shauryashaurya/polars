@@ -201,7 +201,7 @@ impl DataFrame {
     /// Reserve additional slots into the chunks of the series.
     pub(crate) fn reserve_chunks(&mut self, additional: usize) {
         for s in &mut self.columns {
-            // Safety
+            // SAFETY:
             // do not modify the data, simply resize.
             unsafe { s.chunks_mut().reserve(additional) }
         }
@@ -231,7 +231,7 @@ impl DataFrame {
         };
 
         let series_cols = if S::is_series() {
-            // Safety:
+            // SAFETY:
             // we are guarded by the type system here.
             #[allow(clippy::transmute_undefined_repr)]
             let series_cols = unsafe { std::mem::transmute::<Vec<S>, Vec<Series>>(columns) };
@@ -255,11 +255,9 @@ impl DataFrame {
                     None => first_len = Some(s.len()),
                 }
 
-                if names.contains(name) {
+                if !names.insert(name) {
                     polars_bail!(duplicate = name);
                 }
-
-                names.insert(name);
             }
             // we drop early as the brchk thinks the &str borrows are used when calling the drop
             // of both `series_cols` and `names`
@@ -402,13 +400,35 @@ impl DataFrame {
 
     /// Create a new `DataFrame` but does not check the length or duplicate occurrence of the `Series`.
     ///
-    /// It is advised to use [Series::new](Series::new) in favor of this method.
+    /// It is advised to use [DataFrame::new](DataFrame::new) in favor of this method.
     ///
     /// # Panic
     /// It is the callers responsibility to uphold the contract of all `Series`
     /// having an equal length, if not this may panic down the line.
     pub const fn new_no_checks(columns: Vec<Series>) -> DataFrame {
         DataFrame { columns }
+    }
+
+    /// Create a new `DataFrame` but does not check the length of the `Series`,
+    /// only check for duplicates.
+    ///
+    /// It is advised to use [DataFrame::new](DataFrame::new) in favor of this method.
+    ///
+    /// # Panic
+    /// It is the callers responsibility to uphold the contract of all `Series`
+    /// having an equal length, if not this may panic down the line.
+    pub fn new_no_length_checks(columns: Vec<Series>) -> PolarsResult<DataFrame> {
+        let mut names = PlHashSet::with_capacity(columns.len());
+        for column in &columns {
+            let name = column.name();
+            if !names.insert(name) {
+                polars_bail!(duplicate = name);
+            }
+        }
+        // we drop early as the brchk thinks the &str borrows are used when calling the drop
+        // of both `columns` and `names`
+        drop(names);
+        Ok(DataFrame { columns })
     }
 
     /// Aggregate all chunks to contiguous memory.
@@ -1242,7 +1262,7 @@ impl DataFrame {
             },
             None => return None,
         }
-        // safety: we just checked bounds
+        // SAFETY: we just checked bounds
         unsafe { Some(self.columns.iter().map(|s| s.get_unchecked(idx)).collect()) }
     }
 
@@ -1848,7 +1868,7 @@ impl DataFrame {
             take = take.slice(offset, len);
         }
 
-        // Safety:
+        // SAFETY:
         // the created indices are in bounds
         let mut df = unsafe { df.take_unchecked_impl(&take, parallel) };
         set_sorted(&mut df);
@@ -2465,24 +2485,25 @@ impl DataFrame {
         }
     }
 
-    /// Aggregate the column horizontally to their sum values.
+    /// Sum all values horizontally across columns.
     pub fn sum_horizontal(&self, null_strategy: NullStrategy) -> PolarsResult<Option<Series>> {
         let apply_null_strategy =
-            |s: &Series, null_strategy: NullStrategy| -> PolarsResult<Series> {
+            |s: Series, null_strategy: NullStrategy| -> PolarsResult<Series> {
                 if let NullStrategy::Ignore = null_strategy {
                     // if has nulls
-                    if s.has_validity() {
+                    if s.null_count() > 0 {
                         return s.fill_null(FillNullStrategy::Zero);
                     }
                 }
-                Ok(s.clone())
+                Ok(s)
             };
 
         let sum_fn =
-            |acc: &Series, s: &Series, null_strategy: NullStrategy| -> PolarsResult<Series> {
+            |acc: Series, s: Series, null_strategy: NullStrategy| -> PolarsResult<Series> {
                 let acc: Series = apply_null_strategy(acc, null_strategy)?;
                 let s = apply_null_strategy(s, null_strategy)?;
-                Ok(&acc + &s)
+                // This will do owned arithmetic and can be mutable
+                Ok(acc + s)
             };
 
         let non_null_cols = self
@@ -2500,26 +2521,34 @@ impl DataFrame {
                     Ok(Some(self.columns[0].clone()))
                 }
             },
-            1 => Ok(Some(apply_null_strategy(non_null_cols[0], null_strategy)?)),
-            2 => sum_fn(non_null_cols[0], non_null_cols[1], null_strategy).map(Some),
+            1 => Ok(Some(apply_null_strategy(
+                non_null_cols[0].clone(),
+                null_strategy,
+            )?)),
+            2 => sum_fn(
+                non_null_cols[0].clone(),
+                non_null_cols[1].clone(),
+                null_strategy,
+            )
+            .map(Some),
             _ => {
                 // the try_reduce_with is a bit slower in parallelism,
                 // but I don't think it matters here as we parallelize over columns, not over elements
-                POOL.install(|| {
+                let out = POOL.install(|| {
                     non_null_cols
                         .into_par_iter()
-                        .map(|s| Ok(Cow::Borrowed(s)))
-                        .try_reduce_with(|l, r| sum_fn(&l, &r, null_strategy).map(Cow::Owned))
-                        // we can unwrap the option, because we are certain there is a column
-                        // we started this operation on 3 columns
+                        .cloned()
+                        .map(Ok)
+                        .try_reduce_with(|l, r| sum_fn(l, r, null_strategy))
+                        // We can unwrap because we started with at least 3 columns, so we always get a Some
                         .unwrap()
-                        .map(|cow| Some(cow.into_owned()))
-                })
+                });
+                out.map(Some)
             },
         }
     }
 
-    /// Aggregate the column horizontally to their mean values.
+    /// Compute the mean of all values horizontally across columns.
     pub fn mean_horizontal(&self, null_strategy: NullStrategy) -> PolarsResult<Option<Series>> {
         match self.columns.len() {
             0 => Ok(None),

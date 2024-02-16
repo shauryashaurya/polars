@@ -3,10 +3,9 @@ from __future__ import annotations
 import contextlib
 import math
 import operator
-import os
 import warnings
 from datetime import timedelta
-from functools import partial, reduce
+from functools import reduce
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -31,7 +30,7 @@ from polars.datatypes import (
 )
 from polars.dependencies import _check_for_numpy
 from polars.dependencies import numpy as np
-from polars.exceptions import PolarsInefficientMapWarning
+from polars.exceptions import CustomUFuncWarning, PolarsInefficientMapWarning
 from polars.expr.array import ExprArrayNameSpace
 from polars.expr.binary import ExprBinaryNameSpace
 from polars.expr.categorical import ExprCatNameSpace
@@ -41,6 +40,7 @@ from polars.expr.meta import ExprMetaNameSpace
 from polars.expr.name import ExprNameNameSpace
 from polars.expr.string import ExprStringNameSpace
 from polars.expr.struct import ExprStructNameSpace
+from polars.meta import thread_pool_size
 from polars.utils._parse_expr_input import (
     parse_as_expression,
     parse_as_list_of_expressions,
@@ -55,9 +55,10 @@ from polars.utils.deprecation import (
     deprecate_saturating,
     issue_deprecation_warning,
 )
-from polars.utils.meta import threadpool_size
 from polars.utils.unstable import issue_unstable_warning, unstable
 from polars.utils.various import (
+    BUILDING_SPHINX_DOCS,
+    find_stacklevel,
     no_default,
     sphinx_accessor,
     warn_null_comparison,
@@ -65,7 +66,6 @@ from polars.utils.various import (
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     from polars.polars import arg_where as py_arg_where
-    from polars.polars import reduce as pyreduce
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     from polars.polars import PyExpr
@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     T = TypeVar("T")
     P = ParamSpec("P")
 
-elif os.getenv("BUILDING_SPHINX_DOCS"):
+elif BUILDING_SPHINX_DOCS:
     property = sphinx_accessor
 
 
@@ -166,11 +166,11 @@ class Expr:
 
     def __and__(self, other: IntoExprColumn | int | bool) -> Self:
         other = parse_as_expression(other)
-        return self._from_pyexpr(self._pyexpr._and(other))
+        return self._from_pyexpr(self._pyexpr.and_(other))
 
     def __rand__(self, other: IntoExprColumn | int | bool) -> Self:
         other_expr = parse_as_expression(other)
-        return self._from_pyexpr(other_expr._and(self._pyexpr))
+        return self._from_pyexpr(other_expr.and_(self._pyexpr))
 
     def __eq__(self, other: IntoExpr) -> Self:  # type: ignore[override]
         warn_null_comparison(other)
@@ -234,11 +234,11 @@ class Expr:
 
     def __or__(self, other: IntoExprColumn | int | bool) -> Self:
         other = parse_as_expression(other)
-        return self._from_pyexpr(self._pyexpr._or(other))
+        return self._from_pyexpr(self._pyexpr.or_(other))
 
     def __ror__(self, other: IntoExprColumn | int | bool) -> Self:
         other_expr = parse_as_expression(other)
-        return self._from_pyexpr(other_expr._or(self._pyexpr))
+        return self._from_pyexpr(other_expr.or_(self._pyexpr))
 
     def __pos__(self) -> Expr:
         return self
@@ -269,11 +269,11 @@ class Expr:
 
     def __xor__(self, other: IntoExprColumn | int | bool) -> Self:
         other = parse_as_expression(other)
-        return self._from_pyexpr(self._pyexpr._xor(other))
+        return self._from_pyexpr(self._pyexpr.xor_(other))
 
     def __rxor__(self, other: IntoExprColumn | int | bool) -> Self:
         other_expr = parse_as_expression(other)
-        return self._from_pyexpr(other_expr._xor(self._pyexpr))
+        return self._from_pyexpr(other_expr.xor_(self._pyexpr))
 
     def __getstate__(self) -> bytes:
         return self._pyexpr.__getstate__()
@@ -286,23 +286,47 @@ class Expr:
         self, ufunc: Callable[..., Any], method: str, *inputs: Any, **kwargs: Any
     ) -> Self:
         """Numpy universal functions."""
+        if method != "__call__":
+            msg = f"Only call is implemented not {method}"
+            raise NotImplementedError(msg)
+        is_custom_ufunc = ufunc.__class__ != np.ufunc
         num_expr = sum(isinstance(inp, Expr) for inp in inputs)
-        if num_expr > 1:
-            if num_expr < len(inputs):
-                msg = (
-                    "NumPy ufunc with more than one expression can only be used"
-                    " if all non-expression inputs are provided as keyword arguments only"
-                )
-                raise ValueError(msg)
-
-            exprs = parse_as_list_of_expressions(inputs)
-            return self._from_pyexpr(pyreduce(partial(ufunc, **kwargs), exprs))
+        exprs = [
+            (inp, Expr, i) if isinstance(inp, Expr) else (inp, None, i)
+            for i, inp in enumerate(inputs)
+        ]
+        if num_expr == 1:
+            root_expr = next(expr[0] for expr in exprs if expr[1] == Expr)
+        else:
+            root_expr = F.struct(expr[0] for expr in exprs if expr[1] == Expr)
 
         def function(s: Series) -> Series:  # pragma: no cover
-            args = [inp if not isinstance(inp, Expr) else s for inp in inputs]
+            args = []
+            for i, expr in enumerate(exprs):
+                if expr[1] == Expr and num_expr > 1:
+                    args.append(s.struct[i])
+                elif expr[1] == Expr:
+                    args.append(s)
+                else:
+                    args.append(expr[0])
             return ufunc(*args, **kwargs)
 
-        return self.map_batches(function)
+        if is_custom_ufunc is True:
+            msg = (
+                "Native numpy ufuncs are dispatched using `map_batches(ufunc, is_elementwise=True)` which "
+                "is safe for native Numpy and Scipy ufuncs but custom ufuncs in a group_by "
+                "context won't be properly grouped. Custom ufuncs are dispatched with is_elementwise=False. "
+                f"If {ufunc.__name__} needs elementwise then please use map_batches directly."
+            )
+            warnings.warn(
+                msg,
+                CustomUFuncWarning,
+                stacklevel=find_stacklevel(),
+            )
+            return root_expr.map_batches(
+                function, is_elementwise=False
+            ).meta.undo_aliases()
+        return root_expr.map_batches(function, is_elementwise=True).meta.undo_aliases()
 
     @classmethod
     def from_json(cls, value: str) -> Self:
@@ -4359,7 +4383,7 @@ class Expr:
                 if x.len() == 0:
                     return get_lazy_promise(df).collect().to_series()
 
-                n_threads = threadpool_size()
+                n_threads = thread_pool_size()
                 chunk_size = x.len() // n_threads
                 remainder = x.len() % n_threads
                 if chunk_size == 0:
@@ -4387,7 +4411,8 @@ class Expr:
                 wrap_threading, agg_list=True, return_dtype=return_dtype
             )
         else:
-            ValueError(f"Strategy {strategy} is not supported.")
+            msg = f"strategy {strategy!r} is not supported"
+            raise ValueError(msg)
 
     def flatten(self) -> Self:
         """
@@ -7941,9 +7966,9 @@ class Expr:
         └──────┴──────┘
         """
         if lower_bound is not None:
-            lower_bound = parse_as_expression(lower_bound, str_as_lit=True)
+            lower_bound = parse_as_expression(lower_bound)
         if upper_bound is not None:
-            upper_bound = parse_as_expression(upper_bound, str_as_lit=True)
+            upper_bound = parse_as_expression(upper_bound)
         return self._from_pyexpr(self._pyexpr.clip(lower_bound, upper_bound))
 
     def lower_bound(self) -> Self:

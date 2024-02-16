@@ -162,6 +162,7 @@ list_gather = ["polars-ops/list_gather", "polars-lazy?/list_gather"]
 list_sample = ["polars-lazy?/list_sample"]
 list_sets = ["polars-lazy?/list_sets"]
 list_to_struct = ["polars-ops/list_to_struct", "polars-lazy?/list_to_struct"]
+array_to_struct = ["polars-ops/array_to_struct", "polars-lazy?/array_to_struct"]
 log = ["polars-ops/log", "polars-lazy?/log"]
 merge_sorted = ["polars-lazy?/merge_sorted"]
 meta = ["polars-lazy?/meta"]
@@ -274,11 +275,13 @@ dtype-array = [
 ]
 dtype-i8 = [
   "polars-core/dtype-i8",
+  "polars-io/dtype-i8",
   "polars-lazy?/dtype-i8",
   "polars-ops/dtype-i8",
 ]
 dtype-i16 = [
   "polars-core/dtype-i16",
+  "polars-io/dtype-i16",
   "polars-lazy?/dtype-i16",
   "polars-ops/dtype-i16",
 ]
@@ -291,11 +294,13 @@ dtype-decimal = [
 ]
 dtype-u8 = [
   "polars-core/dtype-u8",
+  "polars-io/dtype-u8",
   "polars-lazy?/dtype-u8",
   "polars-ops/dtype-u8",
 ]
 dtype-u16 = [
   "polars-core/dtype-u16",
+  "polars-io/dtype-u16",
   "polars-lazy?/dtype-u16",
   "polars-ops/dtype-u16",
 ]

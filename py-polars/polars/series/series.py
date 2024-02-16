@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import math
-import os
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal as PyDecimal
 from typing import (
@@ -18,7 +17,6 @@ from typing import (
     NoReturn,
     Sequence,
     Union,
-    cast,
     overload,
 )
 
@@ -43,6 +41,7 @@ from polars.datatypes import (
     Object,
     String,
     Time,
+    UInt8,
     UInt32,
     UInt64,
     Unknown,
@@ -59,13 +58,13 @@ from polars.dependencies import (
     _check_for_numpy,
     _check_for_pandas,
     _check_for_pyarrow,
-    dataframe_api_compat,
     hvplot,
 )
 from polars.dependencies import numpy as np
 from polars.dependencies import pandas as pd
 from polars.dependencies import pyarrow as pa
 from polars.exceptions import ModuleUpgradeRequired, ShapeError
+from polars.meta import get_index_type
 from polars.series.array import ArrayNameSpace
 from polars.series.binary import BinaryNameSpace
 from polars.series.categorical import CatNameSpace
@@ -99,9 +98,9 @@ from polars.utils.deprecation import (
     deprecate_renamed_parameter,
     issue_deprecation_warning,
 )
-from polars.utils.meta import get_index_type
 from polars.utils.unstable import unstable
 from polars.utils.various import (
+    BUILDING_SPHINX_DOCS,
     _is_generator,
     no_default,
     parse_version,
@@ -149,7 +148,7 @@ if TYPE_CHECKING:
         from typing import Self
     else:
         from typing_extensions import Self
-elif os.getenv("BUILDING_SPHINX_DOCS"):
+elif BUILDING_SPHINX_DOCS:
     property = sphinx_accessor
 
 ArrayLike = Union[
@@ -369,6 +368,18 @@ class Series:
     def _from_arrow(cls, name: str, values: pa.Array, *, rechunk: bool = True) -> Self:
         """Construct a Series from an Arrow Array."""
         return cls._from_pyseries(arrow_to_pyseries(name, values, rechunk=rechunk))
+
+    @classmethod
+    def _import_from_c(cls, name: str, pointers: list[tuple[int, int]]) -> Self:
+        """
+        Construct a Series from Arrows C interface.
+
+        Warning
+        -------
+        This will read the `array` pointer without moving it. The host process should
+        garbage collect the heap pointer, but not its contents.
+        """
+        return cls._from_pyseries(PySeries._import_from_c(name, pointers))
 
     @classmethod
     def _from_pandas(
@@ -1004,19 +1015,7 @@ class Series:
                 return self._from_pyseries(getattr(self._s, op_s)(_s))
 
         if isinstance(other, (PyDecimal, int)) and self.dtype.is_decimal():
-            # Infer the number's scale.  Then use the max of the inferred scale and the
-            # Series' scale.  At present, this will cause arithmetic to fail with a
-            # PyDecimal that has a scale greater than the Series' scale, but will ensure
-            # that scale is not lost.
             _s = sequence_to_pyseries(self.name, [other], dtype=Decimal)
-            _s = _s.cast(
-                Decimal(
-                    scale=max(
-                        cast(Decimal, _s.dtype()).scale, cast(Decimal, self.dtype).scale
-                    )
-                ),
-                strict=True,
-            )
 
             if "rhs" in op_ffi:
                 return self._from_pyseries(getattr(_s, op_s)(self._s))
@@ -1394,15 +1393,16 @@ class Series:
             msg = f'cannot use "{key!r}" for indexing'
             raise TypeError(msg)
 
-    def __array__(self, dtype: Any = None) -> np.ndarray[Any, Any]:
+    def __array__(self, dtype: Any | None = None) -> np.ndarray[Any, Any]:
         """
         Numpy __array__ interface protocol.
 
         Ensures that `np.asarray(pl.Series(..))` works as expected, see
         https://numpy.org/devdocs/user/basics.interoperability.html#the-array-method.
         """
-        if not dtype and self.dtype == String and not self.null_count():
+        if dtype is None and self.null_count() == 0 and self.dtype == String:
             dtype = np.dtype("U")
+
         if dtype:
             return self.to_numpy().__array__(dtype)
         else:
@@ -1484,19 +1484,6 @@ class Series:
                 f"`{method!r}`"
             )
             raise NotImplementedError(msg)
-
-    def __column_consortium_standard__(self, *, api_version: str | None = None) -> Any:
-        """
-        Provide entry point to the Consortium DataFrame Standard API.
-
-        This is developed and maintained outside of polars.
-        Please report any issues to https://github.com/data-apis/dataframe-api-compat.
-        """
-        return (
-            dataframe_api_compat.polars_standard.convert_to_standard_compliant_column(
-                self, api_version=api_version
-            )
-        )
 
     def _repr_html_(self) -> str:
         """Format output data in HTML for display in Jupyter Notebooks."""
@@ -2075,7 +2062,7 @@ class Series:
         """
         return self.to_frame().select_seq(F.col(self.name).nan_min()).item()
 
-    def std(self, ddof: int = 1) -> float | None:
+    def std(self, ddof: int = 1) -> float | timedelta | None:
         """
         Get the standard deviation of this Series.
 
@@ -2092,11 +2079,9 @@ class Series:
         >>> s.std()
         1.0
         """
-        if not self.dtype.is_numeric():
-            return None
         return self._s.std(ddof)
 
-    def var(self, ddof: int = 1) -> float | None:
+    def var(self, ddof: int = 1) -> float | timedelta | None:
         """
         Get variance of this Series.
 
@@ -2113,8 +2098,6 @@ class Series:
         >>> s.var()
         1.0
         """
-        if not self.dtype.is_numeric():
-            return None
         return self._s.var(ddof)
 
     def median(self) -> PythonLiteral | None:
@@ -4157,12 +4140,18 @@ class Series:
 
     def to_list(self, *, use_pyarrow: bool | None = None) -> list[Any]:
         """
-        Convert this Series to a Python List. This operation clones data.
+        Convert this Series to a Python list.
+
+        This operation copies data.
 
         Parameters
         ----------
         use_pyarrow
-            Use pyarrow for the conversion.
+            Use PyArrow to perform the conversion.
+
+            .. deprecated:: 0.19.9
+                This parameter will be removed. The function can safely be called
+                without the parameter - it should give the exact same result.
 
         Examples
         --------
@@ -4289,40 +4278,37 @@ class Series:
 
     def to_numpy(
         self,
-        *args: Any,
+        *,
         zero_copy_only: bool = False,
         writable: bool = False,
         use_pyarrow: bool = True,
     ) -> np.ndarray[Any, Any]:
         """
-        Convert this Series to numpy.
+        Convert this Series to a NumPy ndarray.
 
-        This operation may clone data but is completely safe. Note that:
+        This operation may copy data, but is completely safe. Note that:
 
-        - data which is purely numeric AND without null values is not cloned;
-        - floating point `nan` values can be zero-copied;
-        - booleans can't be zero-copied.
+        - Data which is purely numeric AND without null values is not cloned
+        - Floating point `nan` values can be zero-copied
+        - Booleans cannot be zero-copied
 
-        To ensure that no data is cloned, set `zero_copy_only=True`.
+        To ensure that no data is copied, set `zero_copy_only=True`.
 
         Parameters
         ----------
-        *args
-            args will be sent to pyarrow.Array.to_numpy.
         zero_copy_only
-            If True, an exception will be raised if the conversion to a numpy
-            array would require copying the underlying data (e.g. in presence
-            of nulls, or for non-primitive types).
+            Raise an exception if the conversion to a NumPy would require copying
+            the underlying data. Data copy occurs, for example, when the Series contains
+            nulls or non-numeric types.
         writable
-            For numpy arrays created with zero copy (view on the Arrow data),
+            For NumPy arrays created with zero copy (view on the Arrow data),
             the resulting array is not writable (Arrow data is immutable).
             By setting this to True, a copy of the array is made to ensure
             it is writable.
         use_pyarrow
             Use `pyarrow.Array.to_numpy
             <https://arrow.apache.org/docs/python/generated/pyarrow.Array.html#pyarrow.Array.to_numpy>`_
-
-            for the conversion to numpy.
+            for the conversion to NumPy.
 
         Examples
         --------
@@ -4334,21 +4320,29 @@ class Series:
         <class 'numpy.ndarray'>
         """
 
-        def convert_to_date(arr: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
-            if self.dtype == Date:
-                tp = "datetime64[D]"
-            elif self.dtype == Duration:
-                tp = f"timedelta64[{self.dtype.time_unit}]"  # type: ignore[attr-defined]
-            else:
-                tp = f"datetime64[{self.dtype.time_unit}]"  # type: ignore[attr-defined]
-            return arr.astype(tp)
-
         def raise_no_zero_copy() -> None:
-            if zero_copy_only:
+            if zero_copy_only and not self.is_empty():
                 msg = "cannot return a zero-copy array"
                 raise ValueError(msg)
 
-        if self.dtype == Array:
+        def temporal_dtype_to_numpy(dtype: PolarsDataType) -> Any:
+            if dtype == Date:
+                return np.dtype("datetime64[D]")
+            elif dtype == Duration:
+                return np.dtype(f"timedelta64[{dtype.time_unit}]")  # type: ignore[union-attr]
+            elif dtype == Datetime:
+                return np.dtype(f"datetime64[{dtype.time_unit}]")  # type: ignore[union-attr]
+            else:
+                msg = f"invalid temporal type: {dtype}"
+                raise TypeError(msg)
+
+        if self.n_chunks() > 1:
+            raise_no_zero_copy()
+            self = self.rechunk()
+
+        dtype = self.dtype
+
+        if dtype == Array:
             np_array = self.explode().to_numpy(
                 zero_copy_only=zero_copy_only,
                 writable=writable,
@@ -4360,38 +4354,41 @@ class Series:
         if (
             use_pyarrow
             and _PYARROW_AVAILABLE
-            and self.dtype != Object
-            and (self.dtype == Time or not self.dtype.is_temporal())
+            and dtype not in (Object, Datetime, Duration, Date)
         ):
             return self.to_arrow().to_numpy(
-                *args, zero_copy_only=zero_copy_only, writable=writable
+                zero_copy_only=zero_copy_only, writable=writable
             )
 
-        elif self.dtype in (Time, Decimal):
-            raise_no_zero_copy()
-            # note: there are no native numpy "time" or "decimal" dtypes
-            return np.array(self.to_list(), dtype="object")
-        else:
-            if not self.null_count():
-                if self.dtype.is_temporal():
-                    np_array = convert_to_date(self._view(ignore_nulls=True))
-                elif self.dtype.is_numeric():
-                    np_array = self._view(ignore_nulls=True)
-                else:
-                    raise_no_zero_copy()
-                    np_array = self._s.to_numpy()
-
-            elif self.dtype.is_temporal():
-                np_array = convert_to_date(self.to_physical()._s.to_numpy())
+        if self.null_count() == 0:
+            if dtype.is_integer() or dtype.is_float():
+                np_array = self._view(ignore_nulls=True)
+            elif dtype == Boolean:
+                raise_no_zero_copy()
+                np_array = self.cast(UInt8)._view(ignore_nulls=True).view(bool)
+            elif dtype in (Datetime, Duration):
+                np_dtype = temporal_dtype_to_numpy(dtype)
+                np_array = self._view(ignore_nulls=True).view(np_dtype)
+            elif dtype == Date:
+                raise_no_zero_copy()
+                np_dtype = temporal_dtype_to_numpy(dtype)
+                np_array = self.to_physical()._view(ignore_nulls=True).astype(np_dtype)
             else:
                 raise_no_zero_copy()
                 np_array = self._s.to_numpy()
 
-            if writable and not np_array.flags.writeable:
-                raise_no_zero_copy()
-                return np_array.copy()
-            else:
-                return np_array
+        else:
+            raise_no_zero_copy()
+            np_array = self._s.to_numpy()
+            if dtype in (Datetime, Duration, Date):
+                np_dtype = temporal_dtype_to_numpy(dtype)
+                np_array = np_array.view(np_dtype)
+
+        if writable and not np_array.flags.writeable:
+            raise_no_zero_copy()
+            np_array = np_array.copy()
+
+        return np_array
 
     def _view(self, *, ignore_nulls: bool = False) -> SeriesView:
         """
@@ -4428,7 +4425,7 @@ class Series:
 
     def to_arrow(self) -> pa.Array:
         """
-        Get the underlying Arrow Array.
+        Return the underlying Arrow array.
 
         If the Series contains only a single chunk this operation is zero copy.
 
