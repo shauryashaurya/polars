@@ -27,6 +27,7 @@ use polars_io::{
 };
 
 use super::builder_functions::*;
+use crate::constants::UNLIMITED_CACHE;
 use crate::dsl::functions::horizontal::all_horizontal;
 use crate::logical_plan::projection::{is_regex_projection, rewrite_projections};
 #[cfg(feature = "python")]
@@ -230,20 +231,25 @@ impl LogicalPlanBuilder {
     }
 
     #[cfg(feature = "ipc")]
-    pub fn scan_ipc<P: Into<std::path::PathBuf>>(
-        path: P,
+    pub fn scan_ipc<P: Into<Arc<[std::path::PathBuf]>>>(
+        paths: P,
         options: IpcScanOptions,
         n_rows: Option<usize>,
         cache: bool,
         row_index: Option<RowIndex>,
         rechunk: bool,
-        #[cfg(feature = "cloud")] cloud_options: Option<CloudOptions>,
+        cloud_options: Option<CloudOptions>,
     ) -> PolarsResult<Self> {
         use polars_io::is_cloud_url;
 
-        let path = path.into();
+        let paths = paths.into();
 
-        let metadata = if is_cloud_url(&path) {
+        // Use first path to get schema.
+        let path = paths
+            .first()
+            .ok_or_else(|| polars_err!(ComputeError: "expected at least 1 path"))?;
+
+        let metadata = if is_cloud_url(path) {
             #[cfg(not(feature = "cloud"))]
             panic!(
                 "One or more of the cloud storage features ('aws', 'gcp', ...) must be enabled."
@@ -261,12 +267,12 @@ impl LogicalPlanBuilder {
             }
         } else {
             arrow::io::ipc::read::read_file_metadata(&mut std::io::BufReader::new(
-                polars_utils::open_file(&path)?,
+                polars_utils::open_file(path)?,
             ))?
         };
 
         Ok(LogicalPlan::Scan {
-            paths: Arc::new([path]),
+            paths,
             file_info: FileInfo::new(
                 prepare_schema(metadata.schema.as_ref().into(), row_index.as_ref()),
                 Some(Arc::clone(&metadata.schema)),
@@ -284,7 +290,6 @@ impl LogicalPlanBuilder {
             predicate: None,
             scan_type: FileScan::Ipc {
                 options,
-                #[cfg(feature = "cloud")]
                 cloud_options,
                 metadata: Some(metadata),
             },
@@ -424,7 +429,7 @@ impl LogicalPlanBuilder {
         LogicalPlan::Cache {
             input,
             id,
-            count: usize::MAX,
+            cache_hits: UNLIMITED_CACHE,
         }
         .into()
     }
@@ -868,7 +873,7 @@ impl LogicalPlanBuilder {
         LogicalPlan::MapFunction {
             input: Box::new(self.0),
             function: FunctionNode::RowIndex {
-                name: Arc::from(name),
+                name: ColumnName::from(name),
                 offset,
                 schema,
             },

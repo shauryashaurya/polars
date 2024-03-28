@@ -490,16 +490,12 @@ pub trait SeriesTrait:
     ) -> PolarsResult<Series> {
         polars_bail!(opq = rolling_map, self._dtype());
     }
-
-    fn tile(&self, _n: usize) -> Series {
-        invalid_operation_panic!(tile, self);
-    }
 }
 
 impl<'a> (dyn SeriesTrait + 'a) {
-    pub fn unpack<N: 'static>(&self) -> PolarsResult<&ChunkedArray<N>>
+    pub fn unpack<N>(&self) -> PolarsResult<&ChunkedArray<N>>
     where
-        N: PolarsDataType,
+        N: 'static + PolarsDataType,
     {
         polars_ensure!(&N::get_dtype() == self.dtype(), unpack);
         Ok(self.as_ref())

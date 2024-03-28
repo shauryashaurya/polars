@@ -41,7 +41,7 @@ pub enum NullStrategy {
     Propagate,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum UniqueKeepStrategy {
     /// Keep the first unique row.
@@ -1860,6 +1860,7 @@ impl DataFrame {
                     let options = SortMultipleOptions {
                         other,
                         descending,
+                        nulls_last,
                         multithreaded: parallel,
                     };
                     first.arg_sort_multiple(&options)?

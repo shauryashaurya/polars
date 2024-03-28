@@ -3372,17 +3372,15 @@ class Expr:
             {UInt32, UInt64, Int32, Int64}. Note that the first three get temporarily
             cast to Int64, so if performance matters use an Int64 column.
         period
-            length of the window - must be non-negative
+            Length of the window - must be non-negative.
         offset
-            offset of the window. Default is -period
+            Offset of the window. Default is `-period`.
         closed : {'right', 'left', 'both', 'none'}
             Define which sides of the temporal interval are closed (inclusive).
         check_sorted
-            When the `by` argument is given, polars can not check sortedness
-            by the metadata and has to do a full scan on the index column to
-            verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to `False`.
-            Doing so incorrectly will lead to incorrect output
+            Whether to check that `index_column` is sorted.
+            If you are sure the data is sorted, you can set this to `False`.
+            Doing so incorrectly will lead to incorrect output.
 
         Examples
         --------
@@ -3846,12 +3844,16 @@ class Expr:
 
     def rle(self) -> Self:
         """
-        Get the lengths and values of runs of identical values.
+        Compress the column data using run-length encoding.
+
+        Run-length encoding (RLE) encodes data by storing each *run* of identical values
+        as a single value and its length.
 
         Returns
         -------
         Expr
-            Expression of data type :class:`Struct` with Fields "lengths" and "values".
+            Expression of data type `Struct` with fields `lengths` of data type `Int32`
+            and `values` of the original data type.
 
         See Also
         --------
@@ -3859,8 +3861,8 @@ class Expr:
 
         Examples
         --------
-        >>> df = pl.DataFrame(pl.Series("s", [1, 1, 2, 1, None, 1, 3, 3]))
-        >>> df.select(pl.col("s").rle()).unnest("s")
+        >>> df = pl.DataFrame({"a": [1, 1, 2, 1, None, 1, 3, 3]})
+        >>> df.select(pl.col("a").rle()).unnest("a")
         shape: (6, 2)
         ┌─────────┬────────┐
         │ lengths ┆ values │
@@ -3881,33 +3883,47 @@ class Expr:
         """
         Get a distinct integer ID for each run of identical values.
 
-        The ID increases by one each time the value of a column (which can be a
-        :class:`Struct`) changes.
+        The ID starts at 0 and increases by one each time the value of the column
+        changes.
 
-        This is especially useful when you want to define a new group for every time a
-        column's value changes, rather than for every distinct value of that column.
+        Returns
+        -------
+        Expr
+            Expression of data type `UInt32`.
 
         See Also
         --------
         rle
 
+        Notes
+        -----
+        This functionality is especially useful for defining a new group for every time
+        a column's value changes, rather than for every distinct value of that column.
+
         Examples
         --------
-        >>> df = pl.DataFrame(dict(a=[1, 2, 1, 1, 1], b=["x", "x", None, "y", "y"]))
-        >>> # It works on structs of multiple values too!
-        >>> df.with_columns(a_r=pl.col("a").rle_id(), ab_r=pl.struct("a", "b").rle_id())
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [1, 2, 1, 1, 1],
+        ...         "b": ["x", "x", None, "y", "y"],
+        ...     }
+        ... )
+        >>> df.with_columns(
+        ...     rle_id_a=pl.col("a").rle_id(),
+        ...     rle_id_ab=pl.struct("a", "b").rle_id(),
+        ... )
         shape: (5, 4)
-        ┌─────┬──────┬─────┬──────┐
-        │ a   ┆ b    ┆ a_r ┆ ab_r │
-        │ --- ┆ ---  ┆ --- ┆ ---  │
-        │ i64 ┆ str  ┆ u32 ┆ u32  │
-        ╞═════╪══════╪═════╪══════╡
-        │ 1   ┆ x    ┆ 0   ┆ 0    │
-        │ 2   ┆ x    ┆ 1   ┆ 1    │
-        │ 1   ┆ null ┆ 2   ┆ 2    │
-        │ 1   ┆ y    ┆ 2   ┆ 3    │
-        │ 1   ┆ y    ┆ 2   ┆ 3    │
-        └─────┴──────┴─────┴──────┘
+        ┌─────┬──────┬──────────┬───────────┐
+        │ a   ┆ b    ┆ rle_id_a ┆ rle_id_ab │
+        │ --- ┆ ---  ┆ ---      ┆ ---       │
+        │ i64 ┆ str  ┆ u32      ┆ u32       │
+        ╞═════╪══════╪══════════╪═══════════╡
+        │ 1   ┆ x    ┆ 0        ┆ 0         │
+        │ 2   ┆ x    ┆ 1        ┆ 1         │
+        │ 1   ┆ null ┆ 2        ┆ 2         │
+        │ 1   ┆ y    ┆ 2        ┆ 3         │
+        │ 1   ┆ y    ┆ 2        ┆ 3         │
+        └─────┴──────┴──────────┴───────────┘
         """
         return self._from_pyexpr(self._pyexpr.rle_id())
 
@@ -4255,7 +4271,9 @@ class Expr:
         The function is applied to each element of column `'a'`:
 
         >>> df.with_columns(  # doctest: +SKIP
-        ...     pl.col("a").map_elements(lambda x: x * 2).alias("a_times_2"),
+        ...     pl.col("a")
+        ...     .map_elements(lambda x: x * 2, return_dtype=pl.Int64)
+        ...     .alias("a_times_2"),
         ... )
         shape: (4, 3)
         ┌─────┬─────┬───────────┐
@@ -4296,7 +4314,7 @@ class Expr:
         >>> (
         ...     df.lazy()
         ...     .group_by("b")
-        ...     .agg(pl.col("a").map_elements(lambda x: x.sum()))
+        ...     .agg(pl.col("a").map_elements(lambda x: x.sum(), return_dtype=pl.Int64))
         ...     .collect()
         ... )  # doctest: +IGNORE_RESULT
         shape: (3, 2)
@@ -4329,7 +4347,9 @@ class Expr:
         ...     }
         ... )
         >>> df.with_columns(
-        ...     scaled=pl.col("val").map_elements(lambda s: s * len(s)).over("key"),
+        ...     scaled=pl.col("val")
+        ...     .map_elements(lambda s: s * len(s), return_dtype=pl.List(pl.Int64))
+        ...     .over("key"),
         ... ).sort("key")
         shape: (6, 3)
         ┌─────┬─────┬────────┐
@@ -5315,12 +5335,16 @@ class Expr:
         ...     schema={"x": pl.UInt8, "y": pl.UInt8},
         ... )
         >>> df.with_columns(
-        ...     pl.col("x").map_elements(binary_string).alias("bin_x"),
-        ...     pl.col("y").map_elements(binary_string).alias("bin_y"),
+        ...     pl.col("x")
+        ...     .map_elements(binary_string, return_dtype=pl.String)
+        ...     .alias("bin_x"),
+        ...     pl.col("y")
+        ...     .map_elements(binary_string, return_dtype=pl.String)
+        ...     .alias("bin_y"),
         ...     pl.col("x").xor(pl.col("y")).alias("xor_xy"),
         ...     pl.col("x")
         ...     .xor(pl.col("y"))
-        ...     .map_elements(binary_string)
+        ...     .map_elements(binary_string, return_dtype=pl.String)
         ...     .alias("bin_xor_xy"),
         ... )
         shape: (4, 6)
@@ -5438,6 +5462,11 @@ class Expr:
         closed : {'both', 'left', 'right', 'none'}
             Define which sides of the interval are closed (inclusive).
 
+        Notes
+        -----
+        If the value of the `lower_bound` is greater than that of the `upper_bound`
+        then the result will be False, as no value can satisfy the condition.
+
         Returns
         -------
         Expr
@@ -5500,6 +5529,25 @@ class Expr:
         │ d   ┆ false      │
         │ e   ┆ false      │
         └─────┴────────────┘
+
+        Use column expressions as lower/upper bounds, comparing to a literal value:
+
+        >>> df = pl.DataFrame({"a": [1, 2, 3, 4, 5], "b": [5, 4, 3, 2, 1]})
+        >>> df.with_columns(
+        ...     pl.lit(3).is_between(pl.col("a"), pl.col("b")).alias("between_ab")
+        ... )
+        shape: (5, 3)
+        ┌─────┬─────┬────────────┐
+        │ a   ┆ b   ┆ between_ab │
+        │ --- ┆ --- ┆ ---        │
+        │ i64 ┆ i64 ┆ bool       │
+        ╞═════╪═════╪════════════╡
+        │ 1   ┆ 5   ┆ true       │
+        │ 2   ┆ 4   ┆ true       │
+        │ 3   ┆ 3   ┆ true       │
+        │ 4   ┆ 2   ┆ false      │
+        │ 5   ┆ 1   ┆ false      │
+        └─────┴─────┴────────────┘
         """
         lower_bound = parse_as_expression(lower_bound)
         upper_bound = parse_as_expression(upper_bound)

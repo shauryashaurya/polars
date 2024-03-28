@@ -442,107 +442,6 @@ class DataFrame:
         return df
 
     @classmethod
-    def _from_dict(
-        cls,
-        data: Mapping[str, Sequence[object] | Mapping[str, Sequence[object]] | Series],
-        schema: SchemaDefinition | None = None,
-        *,
-        schema_overrides: SchemaDict | None = None,
-    ) -> Self:
-        """
-        Construct a DataFrame from a dictionary of sequences.
-
-        Parameters
-        ----------
-        data : dict of sequences
-          Two-dimensional data represented as a dictionary. dict must contain
-          Sequences.
-        schema : Sequence of str, (str,DataType) pairs, or a {str:DataType,} dict
-            The DataFrame schema may be declared in several ways:
-
-            * As a dict of {name:type} pairs; if type is None, it will be auto-inferred.
-            * As a list of column names; in this case types are automatically inferred.
-            * As a list of (name,type) pairs; this is equivalent to the dictionary form.
-
-            If you supply a list of column names that does not match the names in the
-            underlying data, the names given here will overwrite them. The number
-            of names given in the schema should match the underlying data dimensions.
-        schema_overrides : dict, default None
-          Support type specification or override of one or more columns; note that
-          any dtypes inferred from the columns param will be overridden.
-        """
-        return cls._from_pydf(
-            dict_to_pydf(data, schema=schema, schema_overrides=schema_overrides)
-        )
-
-    @classmethod
-    def _from_records(
-        cls,
-        data: Sequence[Any],
-        schema: SchemaDefinition | None = None,
-        *,
-        schema_overrides: SchemaDict | None = None,
-        orient: Orientation | None = None,
-        infer_schema_length: int | None = N_INFER_DEFAULT,
-    ) -> Self:
-        """
-        Construct a DataFrame from a sequence of sequences.
-
-        See Also
-        --------
-        polars.io.from_records
-        """
-        return cls._from_pydf(
-            sequence_to_pydf(
-                data,
-                schema=schema,
-                schema_overrides=schema_overrides,
-                orient=orient,
-                infer_schema_length=infer_schema_length,
-            )
-        )
-
-    @classmethod
-    def _from_numpy(
-        cls,
-        data: np.ndarray[Any, Any],
-        schema: SchemaDefinition | None = None,
-        *,
-        schema_overrides: SchemaDict | None = None,
-        orient: Orientation | None = None,
-    ) -> Self:
-        """
-        Construct a DataFrame from a numpy ndarray.
-
-        Parameters
-        ----------
-        data : numpy ndarray
-            Two-dimensional data represented as a numpy ndarray.
-        schema : Sequence of str, (str,DataType) pairs, or a {str:DataType,} dict
-            The DataFrame schema may be declared in several ways:
-
-            * As a dict of {name:type} pairs; if type is None, it will be auto-inferred.
-            * As a list of column names; in this case types are automatically inferred.
-            * As a list of (name,type) pairs; this is equivalent to the dictionary form.
-
-            If you supply a list of column names that does not match the names in the
-            underlying data, the names given here will overwrite them. The number
-            of names given in the schema should match the underlying data dimensions.
-        schema_overrides : dict, default None
-            Support type specification or override of one or more columns; note that
-            any dtypes inferred from the columns param will be overridden.
-        orient : {'col', 'row'}, default None
-            Whether to interpret two-dimensional data as columns or as rows. If None,
-            the orientation is inferred by matching the columns and data dimensions. If
-            this does not yield conclusive results, column orientation is used.
-        """
-        return cls._from_pydf(
-            numpy_to_pydf(
-                data, schema=schema, schema_overrides=schema_overrides, orient=orient
-            )
-        )
-
-    @classmethod
     def _from_arrow(
         cls,
         data: pa.Table | pa.RecordBatch,
@@ -3546,8 +3445,6 @@ class DataFrame:
             The number of rows affected, if the driver provides this information.
             Otherwise, returns -1.
         """
-        from polars.io.database import _open_adbc_connection
-
         if if_table_exists not in (valid_write_modes := get_args(DbWriteMode)):
             allowed = ", ".join(repr(m) for m in valid_write_modes)
             msg = f"write_database `if_table_exists` must be one of {{{allowed}}}, got {if_table_exists!r}"
@@ -3577,6 +3474,8 @@ class DataFrame:
                     "\n\nInstall Polars with: pip install adbc_driver_manager"
                 )
                 raise ModuleNotFoundError(msg) from exc
+
+            from polars.io.database._utils import _open_adbc_connection
 
             if if_table_exists == "fail":
                 # if the table exists, 'create' will raise an error,
@@ -5482,6 +5381,7 @@ class DataFrame:
         """
         return GroupBy(self, *by, **named_by, maintain_order=maintain_order)
 
+    @deprecate_renamed_parameter("by", "group_by", version="0.20.14")
     def rolling(
         self,
         index_column: IntoExpr,
@@ -5489,7 +5389,7 @@ class DataFrame:
         period: str | timedelta,
         offset: str | timedelta | None = None,
         closed: ClosedInterval = "right",
-        by: IntoExpr | Iterable[IntoExpr] | None = None,
+        group_by: IntoExpr | Iterable[IntoExpr] | None = None,
         check_sorted: bool = True,
     ) -> RollingGroupBy:
         """
@@ -5549,18 +5449,20 @@ class DataFrame:
             {UInt32, UInt64, Int32, Int64}. Note that the first three get temporarily
             cast to Int64, so if performance matters use an Int64 column.
         period
-            length of the window - must be non-negative
+            Length of the window - must be non-negative.
         offset
-            offset of the window. Default is -period
+            Offset of the window. Default is `-period`.
         closed : {'right', 'left', 'both', 'none'}
             Define which sides of the temporal interval are closed (inclusive).
-        by
+        group_by
             Also group by this column/these columns
         check_sorted
-            When the `by` argument is given, polars can not check sortedness
+            Check whether `index_column` is sorted (or, if `group_by` is given,
+            check whether it's sorted within each group).
+            When the `group_by` argument is given, polars can not check sortedness
             by the metadata and has to do a full scan on the index column to
             verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to `False`.
+            data within the groups is sorted, you can set this to `False`.
             Doing so incorrectly will lead to incorrect output
 
         Returns
@@ -5620,10 +5522,11 @@ class DataFrame:
             period=period,
             offset=offset,
             closed=closed,
-            by=by,
+            group_by=group_by,
             check_sorted=check_sorted,
         )
 
+    @deprecate_renamed_parameter("by", "group_by", version="0.20.14")
     def group_by_dynamic(
         self,
         index_column: IntoExpr,
@@ -5635,7 +5538,7 @@ class DataFrame:
         include_boundaries: bool = False,
         closed: ClosedInterval = "left",
         label: Label = "left",
-        by: IntoExpr | Iterable[IntoExpr] | None = None,
+        group_by: IntoExpr | Iterable[IntoExpr] | None = None,
         start_by: StartBy = "window",
         check_sorted: bool = True,
     ) -> DynamicGroupBy:
@@ -5695,7 +5598,7 @@ class DataFrame:
             - 'datapoint': the first value of the index column in the given window.
               If you don't need the label to be at one of the boundaries, choose this
               option for maximum performance
-        by
+        group_by
             Also group by this column/these columns
         start_by : {'window', 'datapoint', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'}
             The strategy to determine the start of the first window by.
@@ -5711,10 +5614,12 @@ class DataFrame:
               * ...
               * 'sunday': Start the window on the Sunday before the first data point.
         check_sorted
-            When the `by` argument is given, polars can not check sortedness
+            Check whether `index_column` is sorted (or, if `group_by` is given,
+            check whether it's sorted within each group).
+            When the `group_by` argument is given, polars can not check sortedness
             by the metadata and has to do a full scan on the index column to
             verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to `False`.
+            data within the groups is sorted, you can set this to `False`.
             Doing so incorrectly will lead to incorrect output
 
         Returns
@@ -5892,7 +5797,7 @@ class DataFrame:
         ...     "time",
         ...     every="1h",
         ...     closed="both",
-        ...     by="groups",
+        ...     group_by="groups",
         ...     include_boundaries=True,
         ... ).agg(pl.col("n"))
         shape: (7, 5)
@@ -5952,18 +5857,19 @@ class DataFrame:
             label=label,
             include_boundaries=include_boundaries,
             closed=closed,
-            by=by,
+            group_by=group_by,
             start_by=start_by,
             check_sorted=check_sorted,
         )
 
+    @deprecate_renamed_parameter("by", "group_by", version="0.20.14")
     def upsample(
         self,
         time_column: str,
         *,
         every: str | timedelta,
         offset: str | timedelta | None = None,
-        by: str | Sequence[str] | None = None,
+        group_by: str | Sequence[str] | None = None,
         maintain_order: bool = False,
     ) -> Self:
         """
@@ -6003,7 +5909,7 @@ class DataFrame:
             Interval will start 'every' duration.
         offset
             Change the start of the date_range by this offset.
-        by
+        group_by
             First group by these columns and then upsample for every group.
         maintain_order
             Keep the ordering predictable. This is slower.
@@ -6032,7 +5938,7 @@ class DataFrame:
         ...     }
         ... ).set_sorted("time")
         >>> df.upsample(
-        ...     time_column="time", every="1mo", by="groups", maintain_order=True
+        ...     time_column="time", every="1mo", group_by="groups", maintain_order=True
         ... ).select(pl.all().forward_fill())
         shape: (7, 3)
         ┌─────────────────────┬────────┬────────┐
@@ -6051,10 +5957,10 @@ class DataFrame:
         """
         every = deprecate_saturating(every)
         offset = deprecate_saturating(offset)
-        if by is None:
-            by = []
-        if isinstance(by, str):
-            by = [by]
+        if group_by is None:
+            group_by = []
+        if isinstance(group_by, str):
+            group_by = [group_by]
         if offset is None:
             offset = "0ns"
 
@@ -6062,7 +5968,7 @@ class DataFrame:
         offset = parse_as_duration_string(offset)
 
         return self._from_pydf(
-            self._df.upsample(by, time_column, every, offset, maintain_order)
+            self._df.upsample(group_by, time_column, every, offset, maintain_order)
         )
 
     def join_asof(
@@ -10655,10 +10561,12 @@ class DataFrame:
         by
             Also group by this column/these columns
         check_sorted
+            Check whether the `index` column is sorted (or, if `by` is given,
+            check whether it's sorted within each group).
             When the `by` argument is given, polars can not check sortedness
             by the metadata and has to do a full scan on the index column to
             verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to `False`.
+            data within the groups is sorted, you can set this to `False`.
             Doing so incorrectly will lead to incorrect output
         """
         return self.rolling(
@@ -10666,7 +10574,7 @@ class DataFrame:
             period=period,
             offset=offset,
             closed=closed,
-            by=by,
+            group_by=by,
             check_sorted=check_sorted,
         )
 
@@ -10707,10 +10615,12 @@ class DataFrame:
         by
             Also group by this column/these columns
         check_sorted
+            Check whether `index_column` is sorted (or, if `by` is given,
+            check whether it's sorted within each group).
             When the `by` argument is given, polars can not check sortedness
             by the metadata and has to do a full scan on the index column to
             verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to `False`.
+            data within the groups is sorted, you can set this to `False`.
             Doing so incorrectly will lead to incorrect output
         """
         return self.rolling(
@@ -10718,7 +10628,7 @@ class DataFrame:
             period=period,
             offset=offset,
             closed=closed,
-            by=by,
+            group_by=by,
             check_sorted=check_sorted,
         )
 
@@ -10785,10 +10695,12 @@ class DataFrame:
               * ...
               * 'sunday': Start the window on the Sunday before the first data point.
         check_sorted
+            Check whether `index_column` is sorted (or, if `by` is given,
+            check whether it's sorted within each group).
             When the `by` argument is given, polars can not check sortedness
             by the metadata and has to do a full scan on the index column to
             verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to `False`.
+            data within the groups is sorted, you can set this to `False`.
             Doing so incorrectly will lead to incorrect output
 
         Returns
@@ -10806,7 +10718,7 @@ class DataFrame:
             truncate=truncate,
             include_boundaries=include_boundaries,
             closed=closed,
-            by=by,
+            group_by=by,
             start_by=start_by,
             check_sorted=check_sorted,
         )
