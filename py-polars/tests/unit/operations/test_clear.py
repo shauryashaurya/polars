@@ -65,7 +65,6 @@ def test_clear_lf() -> None:
     assert ldfe.collect().rows() == [(None, None, None), (None, None, None)]
 
 
-@pytest.mark.skip("Currently bugged: https://github.com/pola-rs/polars/issues/15303")
 def test_clear_series_object_starting_with_null() -> None:
     s = pl.Series([None, object()])
 
@@ -74,3 +73,13 @@ def test_clear_series_object_starting_with_null() -> None:
     assert result.dtype == s.dtype
     assert result.name == s.name
     assert result.is_empty()
+
+
+def test_clear_raise_negative_n() -> None:
+    s = pl.Series([1, 2, 3])
+
+    msg = "`n` should be greater than or equal to 0, got -1"
+    with pytest.raises(ValueError, match=msg):
+        s.clear(-1)
+    with pytest.raises(ValueError, match=msg):
+        s.to_frame().clear(-1)

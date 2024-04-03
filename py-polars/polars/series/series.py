@@ -607,8 +607,12 @@ class Series:
     def __bool__(self) -> NoReturn:
         msg = (
             "the truth value of a Series is ambiguous"
-            "\n\nHint: use '&' or '|' to chain Series boolean results together, not and/or."
-            " To check if a Series contains any values, use `is_empty()`."
+            "\n\n"
+            "Here are some things you might want to try:\n"
+            "- instead of `if s`, use `if not s.is_empty()`\n"
+            "- instead of `s1 and s2`, use `s1 & s2`\n"
+            "- instead of `s1 or s2`, use `s1 | s2`\n"
+            "- instead of `s in [y, z]`, use `s.is_in([y, z])`\n"
         )
         raise TypeError(msg)
 
@@ -3459,6 +3463,11 @@ class Series:
         nulls_last
             Place null values last instead of first.
 
+        See Also
+        --------
+        Series.gather: Take values by index.
+        Series.rank : Get the rank of each row.
+
         Examples
         --------
         >>> s = pl.Series("a", [5, 3, 4, 1, 2])
@@ -4750,6 +4759,10 @@ class Series:
             null
         ]
         """
+        if n < 0:
+            msg = f"`n` should be greater than or equal to 0, got {n}"
+            raise ValueError(msg)
+        # faster path
         if n == 0:
             return self._from_pyseries(self._s.clear())
         s = (
