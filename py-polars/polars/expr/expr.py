@@ -2264,6 +2264,9 @@ class Expr:
         by: IntoExpr | Iterable[IntoExpr],
         *more_by: IntoExpr,
         descending: bool | Sequence[bool] = False,
+        nulls_last: bool = False,
+        multithreaded: bool = True,
+        maintain_order: bool = False,
     ) -> Self:
         """
         Sort this column by the ordering of other columns.
@@ -2281,6 +2284,12 @@ class Expr:
         descending
             Sort in descending order. When sorting by multiple columns, can be specified
             per column by passing a sequence of booleans.
+        nulls_last
+            Place null values last.
+        multithreaded
+            Sort using multiple threads.
+        maintain_order
+            Whether the order should be maintained if elements are equal.
 
         Examples
         --------
@@ -2388,7 +2397,11 @@ class Expr:
         elif len(by) != len(descending):
             msg = f"the length of `descending` ({len(descending)}) does not match the length of `by` ({len(by)})"
             raise ValueError(msg)
-        return self._from_pyexpr(self._pyexpr.sort_by(by, descending))
+        return self._from_pyexpr(
+            self._pyexpr.sort_by(
+                by, descending, nulls_last, multithreaded, maintain_order
+            )
+        )
 
     def gather(
         self, indices: int | list[int] | Expr | Series | np.ndarray[Any, Any]
@@ -5330,16 +5343,16 @@ class Expr:
         ...     pl.col("x").pow(pl.col("x").log(2)).alias("x ** xlog2"),
         ... )
         shape: (4, 3)
-        ┌─────┬───────┬────────────┐
-        │ x   ┆ cube  ┆ x ** xlog2 │
-        │ --- ┆ ---   ┆ ---        │
-        │ i64 ┆ f64   ┆ f64        │
-        ╞═════╪═══════╪════════════╡
-        │ 1   ┆ 1.0   ┆ 1.0        │
-        │ 2   ┆ 8.0   ┆ 2.0        │
-        │ 4   ┆ 64.0  ┆ 16.0       │
-        │ 8   ┆ 512.0 ┆ 512.0      │
-        └─────┴───────┴────────────┘
+        ┌─────┬──────┬────────────┐
+        │ x   ┆ cube ┆ x ** xlog2 │
+        │ --- ┆ ---  ┆ ---        │
+        │ i64 ┆ i64  ┆ f64        │
+        ╞═════╪══════╪════════════╡
+        │ 1   ┆ 1    ┆ 1.0        │
+        │ 2   ┆ 8    ┆ 2.0        │
+        │ 4   ┆ 64   ┆ 16.0       │
+        │ 8   ┆ 512  ┆ 512.0      │
+        └─────┴──────┴────────────┘
         """
         return self.__pow__(exponent)
 
@@ -9185,13 +9198,13 @@ class Expr:
         ┌────────┐
         │ values │
         │ ---    │
-        │ f64    │
+        │ i64    │
         ╞════════╡
-        │ 0.0    │
-        │ -3.0   │
-        │ -8.0   │
-        │ -15.0  │
-        │ -24.0  │
+        │ 0      │
+        │ -3     │
+        │ -8     │
+        │ -15    │
+        │ -24    │
         └────────┘
         """
         return self._from_pyexpr(
