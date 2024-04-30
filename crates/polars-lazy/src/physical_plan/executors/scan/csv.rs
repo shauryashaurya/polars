@@ -5,7 +5,7 @@ use super::*;
 pub struct CsvExec {
     pub path: PathBuf,
     pub schema: SchemaRef,
-    pub options: CsvParserOptions,
+    pub options: CsvReaderOptions,
     pub file_options: FileScanOptions,
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
 }
@@ -45,6 +45,7 @@ impl CsvExec {
             .with_try_parse_dates(self.options.try_parse_dates)
             .with_n_threads(self.options.n_threads)
             .truncate_ragged_lines(self.options.truncate_ragged_lines)
+            .with_decimal_comma(self.options.decimal_comma)
             .raise_if_empty(self.options.raise_if_empty)
             .finish()
     }

@@ -3,10 +3,11 @@ use std::path::PathBuf;
 
 use polars_core::export::arrow::Either;
 use polars_core::POOL;
-use polars_io::csv::read_impl::{BatchedCsvReaderMmap, BatchedCsvReaderRead};
-use polars_io::csv::{CsvEncoding, CsvReader};
+use polars_io::csv::read::{
+    BatchedCsvReaderMmap, BatchedCsvReaderRead, CsvEncoding, CsvReader, CsvReaderOptions,
+};
 use polars_plan::global::_set_n_rows_for_scan;
-use polars_plan::prelude::{CsvParserOptions, FileScanOptions};
+use polars_plan::prelude::FileScanOptions;
 use polars_utils::iter::EnumerateIdxTrait;
 
 use super::*;
@@ -21,7 +22,7 @@ pub(crate) struct CsvSource {
         Option<Either<*mut BatchedCsvReaderMmap<'static>, *mut BatchedCsvReaderRead<'static>>>,
     n_threads: usize,
     path: Option<PathBuf>,
-    options: Option<CsvParserOptions>,
+    options: Option<CsvReaderOptions>,
     file_options: Option<FileScanOptions>,
     verbose: bool,
 }
@@ -82,6 +83,7 @@ impl CsvSource {
             .with_n_threads(options.n_threads)
             .with_try_parse_dates(options.try_parse_dates)
             .truncate_ragged_lines(options.truncate_ragged_lines)
+            .with_decimal_comma(options.decimal_comma)
             .raise_if_empty(options.raise_if_empty);
 
         let reader = Box::new(reader);
@@ -104,7 +106,7 @@ impl CsvSource {
     pub(crate) fn new(
         path: PathBuf,
         schema: SchemaRef,
-        options: CsvParserOptions,
+        options: CsvReaderOptions,
         file_options: FileScanOptions,
         verbose: bool,
     ) -> PolarsResult<Self> {

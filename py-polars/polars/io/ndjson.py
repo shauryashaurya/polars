@@ -28,15 +28,15 @@ def read_ndjson(
     schema_overrides: SchemaDefinition | None = None,
     ignore_errors: bool = False,
 ) -> DataFrame:
-    """
+    r"""
     Read into a DataFrame from a newline delimited JSON file.
 
     Parameters
     ----------
     source
-        Path to a file or a file-like object (by file-like object, we refer to objects
-        that have a `read()` method, such as a file handler (e.g. via builtin `open`
-        function) or `BytesIO`).
+        Path to a file or a file-like object (by "file-like object" we refer to objects
+        that have a `read()` method, such as a file handler like the builtin `open`
+        function, or a `BytesIO` instance).
     schema : Sequence of str, (str,DataType) pairs, or a {str:DataType,} dict
         The DataFrame schema may be declared in several ways:
 
@@ -52,6 +52,22 @@ def read_ndjson(
         any dtypes inferred from the schema param will be overridden.
     ignore_errors
         Return `Null` if parsing fails because of schema mismatches.
+
+    Examples
+    --------
+    >>> from io import StringIO
+    >>> json_str = '{"foo":1,"bar":6}\n{"foo":2,"bar":7}\n{"foo":3,"bar":8}\n'
+    >>> pl.read_ndjson(StringIO(json_str))
+    shape: (3, 2)
+    ┌─────┬─────┐
+    │ foo ┆ bar │
+    │ --- ┆ --- │
+    │ i64 ┆ i64 │
+    ╞═════╪═════╡
+    │ 1   ┆ 6   │
+    │ 2   ┆ 7   │
+    │ 3   ┆ 8   │
+    └─────┴─────┘
     """
     if isinstance(source, StringIO):
         source = BytesIO(source.getvalue().encode())

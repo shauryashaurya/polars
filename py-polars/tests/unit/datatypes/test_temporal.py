@@ -27,7 +27,13 @@ from polars.testing import (
 if TYPE_CHECKING:
     from zoneinfo import ZoneInfo
 
-    from polars.type_aliases import Ambiguous, PolarsTemporalType, TimeUnit
+    from polars.type_aliases import (
+        Ambiguous,
+        FillNullStrategy,
+        PolarsIntegerType,
+        PolarsTemporalType,
+        TimeUnit,
+    )
 else:
     from polars._utils.convert import string_to_zoneinfo as ZoneInfo
 
@@ -764,6 +770,101 @@ def test_upsample_time_zones(
     expected = expected.with_columns(pl.col("time").dt.replace_time_zone(time_zone))
     result = df.upsample(time_column="time", every="60m").fill_null(strategy="forward")
     assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    ("every", "fill", "expected_index", "expected_groups"),
+    [
+        (
+            "1i",
+            "forward",
+            [1, 2, 3, 4] + [5, 6, 7],
+            ["a"] * 4 + ["b"] * 3,
+        ),
+        (
+            "1i",
+            "backward",
+            [1, 2, 3, 4] + [5, 6, 7],
+            ["a"] * 4 + ["b"] * 3,
+        ),
+    ],
+)
+@pytest.mark.parametrize("dtype", [pl.Int32, pl.Int64, pl.UInt32, pl.UInt64])
+def test_upsample_index(
+    every: str,
+    fill: FillNullStrategy | None,
+    expected_index: list[int],
+    expected_groups: list[str],
+    dtype: PolarsIntegerType,
+) -> None:
+    df = (
+        pl.DataFrame(
+            {
+                "index": [1, 2, 4] + [5, 7],
+                "groups": ["a"] * 3 + ["b"] * 2,
+            }
+        )
+        .with_columns(pl.col("index").cast(dtype))
+        .set_sorted("index")
+    )
+    expected = pl.DataFrame(
+        {
+            "index": expected_index,
+            "groups": expected_groups,
+        }
+    ).with_columns(pl.col("index").cast(dtype))
+    result = (
+        df.upsample(time_column="index", group_by="groups", every=every)
+        .fill_null(strategy=fill)
+        .sort(["groups", "index"])
+    )
+    assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    ("every", "offset"),
+    [
+        (
+            "1i",
+            "1h",
+        ),
+        (
+            "1h",
+            "1i",
+        ),
+        (
+            "1h",
+            "0i",
+        ),
+        (
+            "0i",
+            "1h",
+        ),
+    ],
+)
+@pytest.mark.parametrize("maintain_order", [True, False])
+def test_upsample_index_invalid(
+    df: pl.DataFrame,
+    every: str,
+    offset: str,
+    maintain_order: bool,
+) -> None:
+    df = pl.DataFrame(
+        {
+            "index": [1, 2, 4] + [5, 7],
+            "groups": ["a"] * 3 + ["b"] * 2,
+        }
+    ).set_sorted("index")
+    # On Python3.8, mypy complains about combining two context managers into a
+    # tuple, so we nest them instead.
+    with pytest.raises(pl.InvalidOperationError, match=r"must be a parsed integer"):  # noqa: SIM117
+        with pytest.deprecated_call():
+            df.upsample(
+                time_column="index",
+                every=every,
+                offset=offset,
+                maintain_order=maintain_order,
+            )
 
 
 def test_microseconds_accuracy() -> None:
@@ -2206,6 +2307,33 @@ def test_asof_join_by_forward() -> None:
     }
 
 
+def test_truncate_broadcast_left() -> None:
+    df = pl.DataFrame({"every": [None, "1y", "1mo", "1d", "1h"]})
+    out = df.select(
+        date=pl.lit(date(2024, 4, 19)).dt.truncate(pl.col("every")),
+        datetime=pl.lit(datetime(2024, 4, 19, 10, 30, 20)).dt.truncate(pl.col("every")),
+    )
+    expected = pl.DataFrame(
+        {
+            "date": [
+                None,
+                date(2024, 1, 1),
+                date(2024, 4, 1),
+                date(2024, 4, 19),
+                date(2024, 4, 19),
+            ],
+            "datetime": [
+                None,
+                datetime(2024, 1, 1),
+                datetime(2024, 4, 1),
+                datetime(2024, 4, 19),
+                datetime(2024, 4, 19, 10),
+            ],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
 def test_truncate_expr() -> None:
     df = pl.DataFrame(
         {
@@ -2582,7 +2710,7 @@ def test_tz_aware_day_weekday() -> None:
 
     df = df.with_columns(
         [
-            pl.col("date").dt.convert_time_zone("Asia/Tokyo").alias("tyo_date"),
+            pl.col("date").dt.convert_time_zone("Asia/Tokyo").alias("tk_date"),
             pl.col("date").dt.convert_time_zone("America/New_York").alias("ny_date"),
         ]
     )
@@ -2590,18 +2718,18 @@ def test_tz_aware_day_weekday() -> None:
     assert df.select(
         [
             pl.col("date").dt.day().alias("day"),
-            pl.col("tyo_date").dt.day().alias("tyo_day"),
+            pl.col("tk_date").dt.day().alias("tk_day"),
             pl.col("ny_date").dt.day().alias("ny_day"),
             pl.col("date").dt.weekday().alias("weekday"),
-            pl.col("tyo_date").dt.weekday().alias("tyo_weekday"),
+            pl.col("tk_date").dt.weekday().alias("tk_weekday"),
             pl.col("ny_date").dt.weekday().alias("ny_weekday"),
         ]
     ).to_dict(as_series=False) == {
         "day": [1, 4, 7],
-        "tyo_day": [1, 4, 7],
+        "tk_day": [1, 4, 7],
         "ny_day": [31, 3, 6],
         "weekday": [1, 4, 7],
-        "tyo_weekday": [1, 4, 7],
+        "tk_weekday": [1, 4, 7],
         "ny_weekday": [7, 3, 6],
     }
 

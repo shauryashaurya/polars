@@ -917,3 +917,41 @@ def test_rolling_min_periods(
         )
     )["value"]
     assert_series_equal(result, pl.Series("value", expected, pl.Int64))
+
+
+def test_rolling_returns_scalar_15656() -> None:
+    df = pl.DataFrame(
+        {
+            "a": [date(2020, 1, 1), date(2020, 1, 2), date(2020, 1, 3)],
+            "b": [4, 5, 6],
+            "c": [1, 2, 3],
+        }
+    )
+    result = df.group_by("c").agg(pl.col("b").rolling_mean("2d", by="a")).sort("c")
+    expected = pl.DataFrame({"c": [1, 2, 3], "b": [[4.0], [5.0], [6.0]]})
+    assert_frame_equal(result, expected)
+
+
+def test_rolling_invalid() -> None:
+    df = pl.DataFrame(
+        {
+            "values": [1, 4],
+            "times": [datetime(2020, 1, 3), datetime(2020, 1, 1)],
+        },
+    )
+    with pytest.raises(
+        pl.InvalidOperationError, match="duration may not be a parsed integer"
+    ):
+        (
+            df.sort("times")
+            .rolling("times", period="3000i")
+            .agg(pl.col("values").sum().alias("sum"))
+        )
+    with pytest.raises(
+        pl.InvalidOperationError, match="duration must be a parsed integer"
+    ):
+        (
+            df.with_row_index()
+            .rolling("index", period="3000d")
+            .agg(pl.col("values").sum().alias("sum"))
+        )

@@ -443,6 +443,16 @@ def test_list_min_max() -> None:
     }
 
 
+def test_list_mean_fast_path_empty() -> None:
+    df = pl.DataFrame(
+        {
+            "a": [[], [1, 2, 3]],
+        }
+    )
+    output = df.select(pl.col("a").list.mean())
+    assert output.to_dict(as_series=False) == {"a": [None, 2.0]}
+
+
 def test_list_min_max_13978() -> None:
     df = pl.DataFrame(
         {
@@ -790,3 +800,34 @@ def test_list_of_series_with_nulls() -> None:
     inner_series = pl.Series("inner", [1, 2, 3])
     s = pl.Series("a", [inner_series, None])
     assert_series_equal(s, pl.Series("a", [[1, 2, 3], None]))
+
+
+def test_take_list_15719() -> None:
+    schema = pl.List(pl.List(pl.Int64))
+    df = pl.DataFrame(
+        {"a": [None, None], "b": [None, [[1, 2]]]}, schema={"a": schema, "b": schema}
+    )
+    df = df.select(
+        a_explode=pl.col("a").explode(),
+        a_get=pl.col("a").list.get(0),
+        b_explode=pl.col("b").explode(),
+        b_get=pl.col("b").list.get(0),
+    )
+
+    expected_schema = pl.List(pl.Int64)
+    expected = pl.DataFrame(
+        {
+            "a_explode": [None, None],
+            "a_get": [None, None],
+            "b_explode": [None, [1, 2]],
+            "b_get": [None, [1, 2]],
+        },
+        schema={
+            "a_explode": expected_schema,
+            "a_get": expected_schema,
+            "b_explode": expected_schema,
+            "b_get": expected_schema,
+        },
+    )
+
+    assert_frame_equal(df, expected)

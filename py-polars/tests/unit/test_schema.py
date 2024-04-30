@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import date, timedelta
-from typing import Any, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 import pytest
 
 import polars as pl
 from polars.testing import assert_frame_equal, assert_series_equal
+
+if TYPE_CHECKING:
+    from polars.type_aliases import PolarsDataType
 
 
 class CustomSchema(Mapping[str, Any]):
@@ -65,7 +68,7 @@ def test_fill_null_minimal_upcast_4056() -> None:
     df = pl.DataFrame({"a": [-1, 2, None]})
     df = df.with_columns(pl.col("a").cast(pl.Int8))
     assert df.with_columns(pl.col(pl.Int8).fill_null(-1)).dtypes[0] == pl.Int8
-    assert df.with_columns(pl.col(pl.Int8).fill_null(-1000)).dtypes[0] == pl.Int32
+    assert df.with_columns(pl.col(pl.Int8).fill_null(-1000)).dtypes[0] == pl.Int16
 
 
 def test_fill_enum_upcast() -> None:
@@ -400,26 +403,6 @@ def test_schema_true_divide_6643() -> None:
     assert df.lazy().select(a / 2).select(pl.col(pl.Int64)).collect().shape == (0, 0)
 
 
-def test_rename_schema_order_6660() -> None:
-    df = pl.DataFrame(
-        {
-            "a": [],
-            "b": [],
-            "c": [],
-            "d": [],
-        }
-    )
-
-    mapper = {"a": "1", "b": "2", "c": "3", "d": "4"}
-
-    renamed = df.lazy().rename(mapper)
-
-    computed = renamed.select([pl.all(), pl.col("4").alias("computed")])
-
-    assert renamed.schema == renamed.collect().schema
-    assert computed.schema == computed.collect().schema
-
-
 def test_from_dicts_all_cols_6716() -> None:
     dicts = [{"a": None} for _ in range(20)] + [{"a": "crash"}]
 
@@ -638,6 +621,33 @@ def test_literal_subtract_schema_13284() -> None:
 def test_schema_boolean_sum_horizontal() -> None:
     lf = pl.LazyFrame({"a": [True, False]}).select(pl.sum_horizontal("a"))
     assert lf.schema == OrderedDict([("a", pl.UInt32)])
+
+
+@pytest.mark.parametrize(
+    ("in_dtype", "out_dtype"),
+    [
+        (pl.Boolean, pl.Float64),
+        (pl.UInt8, pl.Float64),
+        (pl.UInt16, pl.Float64),
+        (pl.UInt32, pl.Float64),
+        (pl.UInt64, pl.Float64),
+        (pl.Int8, pl.Float64),
+        (pl.Int16, pl.Float64),
+        (pl.Int32, pl.Float64),
+        (pl.Int64, pl.Float64),
+        (pl.Float32, pl.Float32),
+        (pl.Float64, pl.Float64),
+    ],
+)
+def test_schema_mean_horizontal_single_column(
+    in_dtype: PolarsDataType,
+    out_dtype: PolarsDataType,
+) -> None:
+    lf = pl.LazyFrame({"a": pl.Series([1, 0], dtype=in_dtype)}).select(
+        pl.mean_horizontal(pl.all())
+    )
+
+    assert lf.schema == OrderedDict([("a", out_dtype)])
 
 
 def test_struct_alias_prune_15401() -> None:

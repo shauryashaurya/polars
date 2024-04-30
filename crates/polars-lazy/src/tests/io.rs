@@ -415,7 +415,7 @@ fn test_ipc_globbing() -> PolarsResult<()> {
             cache: true,
             rechunk: false,
             row_index: None,
-            memmap: true,
+            memory_map: true,
             cloud_options: None,
         },
     )?
@@ -672,10 +672,10 @@ fn scan_small_dtypes() -> PolarsResult<()> {
     for dt in small_dt {
         let df = LazyCsvReader::new(FOODS_CSV)
             .has_header(true)
-            .with_dtype_overwrite(Some(&Schema::from_iter([Field::new(
+            .with_dtype_overwrite(Some(Arc::new(Schema::from_iter([Field::new(
                 "sugars_g",
                 dt.clone(),
-            )])))
+            )]))))
             .finish()?
             .select(&[col("sugars_g")])
             .collect()?;

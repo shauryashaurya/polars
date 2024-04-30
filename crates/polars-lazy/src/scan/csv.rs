@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use polars_core::prelude::*;
-use polars_io::csv::utils::infer_file_schema;
-use polars_io::csv::{CommentPrefix, CsvEncoding, NullValues};
+use polars_io::csv::read::{infer_file_schema, CommentPrefix, CsvEncoding, NullValues};
 use polars_io::utils::get_reader_bytes;
 use polars_io::RowIndex;
 
@@ -10,36 +9,38 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 #[cfg(feature = "csv")]
-pub struct LazyCsvReader<'a> {
+pub struct LazyCsvReader {
     path: PathBuf,
     paths: Arc<[PathBuf]>,
     separator: u8,
-    has_header: bool,
-    ignore_errors: bool,
     skip_rows: usize,
     n_rows: Option<usize>,
-    cache: bool,
     schema: Option<SchemaRef>,
-    schema_overwrite: Option<&'a Schema>,
-    low_memory: bool,
+    schema_overwrite: Option<SchemaRef>,
     comment_prefix: Option<CommentPrefix>,
     quote_char: Option<u8>,
     eol_char: u8,
     null_values: Option<NullValues>,
-    missing_is_null: bool,
-    truncate_ragged_lines: bool,
     infer_schema_length: Option<usize>,
     rechunk: bool,
     skip_rows_after_header: usize,
     encoding: CsvEncoding,
     row_index: Option<RowIndex>,
+    n_threads: Option<usize>,
+    cache: bool,
+    has_header: bool,
+    ignore_errors: bool,
+    low_memory: bool,
+    missing_is_null: bool,
+    truncate_ragged_lines: bool,
+    decimal_comma: bool,
     try_parse_dates: bool,
     raise_if_empty: bool,
-    n_threads: Option<usize>,
+    glob: bool,
 }
 
 #[cfg(feature = "csv")]
-impl<'a> LazyCsvReader<'a> {
+impl LazyCsvReader {
     pub fn new_paths(paths: Arc<[PathBuf]>) -> Self {
         Self::new("").with_paths(paths)
     }
@@ -71,6 +72,8 @@ impl<'a> LazyCsvReader<'a> {
             raise_if_empty: true,
             truncate_ragged_lines: false,
             n_threads: None,
+            decimal_comma: false,
+            glob: true,
         }
     }
 
@@ -129,7 +132,7 @@ impl<'a> LazyCsvReader<'a> {
     /// Overwrite the schema with the dtypes in this given Schema. The given schema may be a subset
     /// of the total schema.
     #[must_use]
-    pub fn with_dtype_overwrite(mut self, schema: Option<&'a Schema>) -> Self {
+    pub fn with_dtype_overwrite(mut self, schema: Option<SchemaRef>) -> Self {
         self.schema_overwrite = schema;
         self
     }
@@ -231,6 +234,19 @@ impl<'a> LazyCsvReader<'a> {
         self
     }
 
+    #[must_use]
+    pub fn with_decimal_comma(mut self, toggle: bool) -> Self {
+        self.decimal_comma = toggle;
+        self
+    }
+
+    #[must_use]
+    /// Expand path given via globbing rules.
+    pub fn with_glob(mut self, toggle: bool) -> Self {
+        self.glob = toggle;
+        self
+    }
+
     /// Modify a schema before we run the lazy scanning.
     ///
     /// Important! Run this function latest in the builder!
@@ -266,11 +282,12 @@ impl<'a> LazyCsvReader<'a> {
             self.try_parse_dates,
             self.raise_if_empty,
             &mut self.n_threads,
+            self.decimal_comma,
         )?;
         let mut schema = f(schema)?;
 
         // the dtypes set may be for the new names, so update again
-        if let Some(overwrite_schema) = self.schema_overwrite {
+        if let Some(overwrite_schema) = &self.schema_overwrite {
             for (name, dtype) in overwrite_schema.iter() {
                 schema.with_column(name.clone(), dtype.clone());
             }
@@ -280,9 +297,9 @@ impl<'a> LazyCsvReader<'a> {
     }
 }
 
-impl LazyFileListReader for LazyCsvReader<'_> {
+impl LazyFileListReader for LazyCsvReader {
     fn finish_no_glob(self) -> PolarsResult<LazyFrame> {
-        let mut lf: LazyFrame = LogicalPlanBuilder::scan_csv(
+        let mut lf: LazyFrame = DslBuilder::scan_csv(
             self.path,
             self.separator,
             self.has_header,
@@ -306,11 +323,16 @@ impl LazyFileListReader for LazyCsvReader<'_> {
             self.raise_if_empty,
             self.truncate_ragged_lines,
             self.n_threads,
+            self.decimal_comma,
         )?
         .build()
         .into();
         lf.opt_state.file_caching = true;
         Ok(lf)
+    }
+
+    fn glob(&self) -> bool {
+        self.glob
     }
 
     fn path(&self) -> &Path {

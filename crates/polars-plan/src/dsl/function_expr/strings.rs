@@ -62,6 +62,8 @@ pub enum StringFunction {
         dtype: Option<DataType>,
         infer_schema_len: Option<usize>,
     },
+    #[cfg(feature = "extract_jsonpath")]
+    JsonPathMatch,
     #[cfg(feature = "regex")]
     Replace {
         // negative is replace all
@@ -82,6 +84,8 @@ pub enum StringFunction {
         fill_char: char,
     },
     Slice,
+    Head,
+    Tail,
     #[cfg(feature = "string_encoding")]
     HexEncode,
     #[cfg(feature = "binary_encoding")]
@@ -144,6 +148,8 @@ impl StringFunction {
             Find { .. } => mapper.with_dtype(DataType::UInt32),
             #[cfg(feature = "extract_jsonpath")]
             JsonDecode { dtype, .. } => mapper.with_opt_dtype(dtype.clone()),
+            #[cfg(feature = "extract_jsonpath")]
+            JsonPathMatch => mapper.with_dtype(DataType::String),
             LenBytes => mapper.with_dtype(DataType::UInt32),
             LenChars => mapper.with_dtype(DataType::UInt32),
             #[cfg(feature = "regex")]
@@ -166,7 +172,7 @@ impl StringFunction {
             #[cfg(feature = "binary_encoding")]
             Base64Decode(_) => mapper.with_dtype(DataType::Binary),
             Uppercase | Lowercase | StripChars | StripCharsStart | StripCharsEnd | StripPrefix
-            | StripSuffix | Slice => mapper.with_same_dtype(),
+            | StripSuffix | Slice | Head | Tail => mapper.with_same_dtype(),
             #[cfg(feature = "string_pad")]
             PadStart { .. } | PadEnd { .. } | ZFill => mapper.with_same_dtype(),
             #[cfg(feature = "dtype-struct")]
@@ -210,8 +216,12 @@ impl Display for StringFunction {
             ToInteger { .. } => "to_integer",
             #[cfg(feature = "regex")]
             Find { .. } => "find",
+            Head { .. } => "head",
+            Tail { .. } => "tail",
             #[cfg(feature = "extract_jsonpath")]
             JsonDecode { .. } => "json_decode",
+            #[cfg(feature = "extract_jsonpath")]
+            JsonPathMatch => "json_path_match",
             LenBytes => "len_bytes",
             Lowercase => "lowercase",
             LenChars => "len_chars",
@@ -345,6 +355,8 @@ impl From<StringFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
             #[cfg(feature = "string_to_integer")]
             ToInteger(strict) => map_as_slice!(strings::to_integer, strict),
             Slice => map_as_slice!(strings::str_slice),
+            Head => map_as_slice!(strings::str_head),
+            Tail => map_as_slice!(strings::str_tail),
             #[cfg(feature = "string_encoding")]
             HexEncode => map!(strings::hex_encode),
             #[cfg(feature = "binary_encoding")]
@@ -361,6 +373,8 @@ impl From<StringFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
                 dtype,
                 infer_schema_len,
             } => map!(strings::json_decode, dtype.clone(), infer_schema_len),
+            #[cfg(feature = "extract_jsonpath")]
+            JsonPathMatch => map_as_slice!(strings::json_path_match),
             #[cfg(feature = "find_many")]
             ContainsMany {
                 ascii_case_insensitive,
@@ -894,7 +908,8 @@ pub(super) fn to_integer(s: &[Series], strict: bool) -> PolarsResult<Series> {
     ca.to_integer(base.u32()?, strict)
         .map(|ok| ok.into_series())
 }
-pub(super) fn str_slice(s: &[Series]) -> PolarsResult<Series> {
+
+fn _ensure_lengths(s: &[Series]) -> bool {
     // Calculate the post-broadcast length and ensure everything is consistent.
     let len = s
         .iter()
@@ -902,14 +917,39 @@ pub(super) fn str_slice(s: &[Series]) -> PolarsResult<Series> {
         .filter(|l| *l != 1)
         .max()
         .unwrap_or(1);
+    s.iter()
+        .all(|series| series.len() == 1 || series.len() == len)
+}
+
+pub(super) fn str_slice(s: &[Series]) -> PolarsResult<Series> {
     polars_ensure!(
-        s.iter().all(|series| series.len() == 1 || series.len() == len),
-        ComputeError: "all series in `str_slice` should have equal or unit length"
+        _ensure_lengths(s),
+        ComputeError: "all series in `str_slice` should have equal or unit length",
     );
     let ca = s[0].str()?;
     let offset = &s[1];
     let length = &s[2];
     Ok(ca.str_slice(offset, length)?.into_series())
+}
+
+pub(super) fn str_head(s: &[Series]) -> PolarsResult<Series> {
+    polars_ensure!(
+        _ensure_lengths(s),
+        ComputeError: "all series in `str_head` should have equal or unit length",
+    );
+    let ca = s[0].str()?;
+    let n = &s[1];
+    Ok(ca.str_head(n)?.into_series())
+}
+
+pub(super) fn str_tail(s: &[Series]) -> PolarsResult<Series> {
+    polars_ensure!(
+        _ensure_lengths(s),
+        ComputeError: "all series in `str_tail` should have equal or unit length",
+    );
+    let ca = s[0].str()?;
+    let n = &s[1];
+    Ok(ca.str_tail(n)?.into_series())
 }
 
 #[cfg(feature = "string_encoding")]
@@ -951,4 +991,11 @@ pub(super) fn json_decode(
 ) -> PolarsResult<Series> {
     let ca = s.str()?;
     ca.json_decode(dtype, infer_schema_len)
+}
+
+#[cfg(feature = "extract_jsonpath")]
+pub(super) fn json_path_match(s: &[Series]) -> PolarsResult<Series> {
+    let ca = s[0].str()?;
+    let pat = s[1].str()?;
+    Ok(ca.json_path_match(pat)?.into_series())
 }

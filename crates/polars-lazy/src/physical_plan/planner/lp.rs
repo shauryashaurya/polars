@@ -172,7 +172,25 @@ pub fn create_physical_plan(
             Ok(Box::new(executors::SliceExec { input, offset, len }))
         },
         Filter { input, predicate } => {
+            let mut streamable = is_streamable(predicate.node(), expr_arena, Context::Default);
             let input_schema = lp_arena.get(input).schema(lp_arena).into_owned();
+            if streamable {
+                // This can cause problems with string caches
+                streamable = !input_schema
+                    .iter_dtypes()
+                    .any(|dt| dt.contains_categoricals())
+                    || {
+                        #[cfg(feature = "dtype-categorical")]
+                        {
+                            polars_core::using_string_cache()
+                        }
+
+                        #[cfg(not(feature = "dtype-categorical"))]
+                        {
+                            false
+                        }
+                    }
+            }
             let input = create_physical_plan(input, lp_arena, expr_arena)?;
             let mut state = ExpressionConversionState::default();
             let predicate = create_physical_expr(
@@ -186,6 +204,7 @@ pub fn create_physical_plan(
                 predicate,
                 input,
                 state.has_windows,
+                streamable,
             )))
         },
         #[allow(unused_variables)]
@@ -276,6 +295,12 @@ pub fn create_physical_plan(
             let input_schema = lp_arena.get(input).schema(lp_arena).into_owned();
             let input = create_physical_plan(input, lp_arena, expr_arena)?;
             let mut state = ExpressionConversionState::new(POOL.current_num_threads() > expr.len());
+
+            let streamable = if expr.has_sub_exprs() {
+                false
+            } else {
+                all_streamable(&expr, expr_arena, Context::Default)
+            };
             let phys_expr = create_physical_expressions_from_irs(
                 expr.default_exprs(),
                 Context::Default,
@@ -299,6 +324,7 @@ pub fn create_physical_plan(
                 #[cfg(test)]
                 schema: _schema,
                 options,
+                streamable,
             }))
         },
         DataFrameScan {
@@ -522,6 +548,12 @@ pub fn create_physical_plan(
             let input_schema = lp_arena.get(input).schema(lp_arena).into_owned();
             let input = create_physical_plan(input, lp_arena, expr_arena)?;
 
+            let streamable = if exprs.has_sub_exprs() {
+                false
+            } else {
+                all_streamable(&exprs, expr_arena, Context::Default)
+            };
+
             let mut state =
                 ExpressionConversionState::new(POOL.current_num_threads() > exprs.len());
 
@@ -547,6 +579,7 @@ pub fn create_physical_plan(
                 exprs: phys_exprs,
                 input_schema,
                 options,
+                streamable,
             }))
         },
         MapFunction {

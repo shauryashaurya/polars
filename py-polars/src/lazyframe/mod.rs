@@ -1,5 +1,6 @@
 mod exitable;
-
+mod visit;
+pub(crate) mod visitor;
 use std::collections::HashMap;
 use std::io::BufWriter;
 use std::num::NonZeroUsize;
@@ -13,6 +14,7 @@ use polars_core::prelude::*;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+pub(crate) use visit::PyExprIR;
 
 use crate::arrow_interop::to_rust::pyarrow_schema_to_rust;
 use crate::error::PyPolarsErr;
@@ -57,7 +59,7 @@ impl PyLazyFrame {
         // Used in pickle/pickling
         match state.extract::<&PyBytes>(py) {
             Ok(s) => {
-                let lp: LogicalPlan = ciborium::de::from_reader(s.as_bytes())
+                let lp: DslPlan = ciborium::de::from_reader(s.as_bytes())
                     .map_err(|e| PyPolarsErr::Other(format!("{}", e)))?;
                 self.ldf = LazyFrame::from(lp);
                 Ok(())
@@ -92,7 +94,7 @@ impl PyLazyFrame {
         // in this scope.
         let json = unsafe { std::mem::transmute::<&'_ str, &'static str>(json.as_str()) };
 
-        let lp = serde_json::from_str::<LogicalPlan>(json)
+        let lp = serde_json::from_str::<DslPlan>(json)
             .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
         Ok(LazyFrame::from(lp).into())
     }
@@ -141,7 +143,7 @@ impl PyLazyFrame {
     #[pyo3(signature = (path, paths, separator, has_header, ignore_errors, skip_rows, n_rows, cache, overwrite_dtype,
         low_memory, comment_prefix, quote_char, null_values, missing_utf8_is_empty_string,
         infer_schema_length, with_schema_modify, rechunk, skip_rows_after_header,
-        encoding, row_index, try_parse_dates, eol_char, raise_if_empty, truncate_ragged_lines, schema
+        encoding, row_index, try_parse_dates, eol_char, raise_if_empty, truncate_ragged_lines, decimal_comma, glob, schema
     )
     )]
     fn new_from_csv(
@@ -169,6 +171,8 @@ impl PyLazyFrame {
         eol_char: &str,
         raise_if_empty: bool,
         truncate_ragged_lines: bool,
+        decimal_comma: bool,
+        glob: bool,
         schema: Option<Wrap<Schema>>,
     ) -> PyResult<Self> {
         let null_values = null_values.map(|w| w.0);
@@ -198,7 +202,7 @@ impl PyLazyFrame {
             .with_skip_rows(skip_rows)
             .with_n_rows(n_rows)
             .with_cache(cache)
-            .with_dtype_overwrite(overwrite_dtype.as_ref())
+            .with_dtype_overwrite(overwrite_dtype.map(Arc::new))
             .with_schema(schema.map(|schema| Arc::new(schema.0)))
             .low_memory(low_memory)
             .with_comment_prefix(comment_prefix)
@@ -212,6 +216,8 @@ impl PyLazyFrame {
             .with_null_values(null_values)
             .with_missing_is_null(!missing_utf8_is_empty_string)
             .truncate_ragged_lines(truncate_ragged_lines)
+            .with_decimal_comma(decimal_comma)
+            .with_glob(glob)
             .raise_if_empty(raise_if_empty);
 
         if let Some(lambda) = with_schema_modify {
@@ -243,7 +249,7 @@ impl PyLazyFrame {
     #[cfg(feature = "parquet")]
     #[staticmethod]
     #[pyo3(signature = (path, paths, n_rows, cache, parallel, rechunk, row_index,
-        low_memory, cloud_options, use_statistics, hive_partitioning, hive_schema, retries)
+        low_memory, cloud_options, use_statistics, hive_partitioning, hive_schema, retries, glob)
     )]
     fn new_from_parquet(
         path: Option<PathBuf>,
@@ -259,6 +265,7 @@ impl PyLazyFrame {
         hive_partitioning: bool,
         hive_schema: Option<Wrap<Schema>>,
         retries: usize,
+        glob: bool,
     ) -> PyResult<Self> {
         let parallel = parallel.0;
         let hive_schema = hive_schema.map(|s| Arc::new(s.0));
@@ -300,6 +307,7 @@ impl PyLazyFrame {
             cloud_options,
             use_statistics,
             hive_options,
+            glob,
         };
 
         let lf = if path.is_some() {
@@ -358,7 +366,7 @@ impl PyLazyFrame {
             cache,
             rechunk,
             row_index,
-            memmap: memory_map,
+            memory_map,
             #[cfg(feature = "cloud")]
             cloud_options,
         };
@@ -569,27 +577,25 @@ impl PyLazyFrame {
     }
 
     #[pyo3(signature = (lambda,))]
-    fn collect_with_callback(&self, py: Python, lambda: PyObject) {
-        py.allow_threads(|| {
-            let ldf = self.ldf.clone();
+    fn collect_with_callback(&self, lambda: PyObject) {
+        let ldf = self.ldf.clone();
 
-            polars_core::POOL.spawn(move || {
-                let result = ldf
-                    .collect()
-                    .map(PyDataFrame::new)
-                    .map_err(PyPolarsErr::from);
+        polars_core::POOL.spawn(move || {
+            let result = ldf
+                .collect()
+                .map(PyDataFrame::new)
+                .map_err(PyPolarsErr::from);
 
-                Python::with_gil(|py| match result {
-                    Ok(df) => {
-                        lambda.call1(py, (df,)).map_err(|err| err.restore(py)).ok();
-                    },
-                    Err(err) => {
-                        lambda
-                            .call1(py, (PyErr::from(err).to_object(py),))
-                            .map_err(|err| err.restore(py))
-                            .ok();
-                    },
-                });
+            Python::with_gil(|py| match result {
+                Ok(df) => {
+                    lambda.call1(py, (df,)).map_err(|err| err.restore(py)).ok();
+                },
+                Err(err) => {
+                    lambda
+                        .call1(py, (PyErr::from(err).to_object(py),))
+                        .map_err(|err| err.restore(py))
+                        .ok();
+                },
             });
         });
     }
@@ -874,7 +880,13 @@ impl PyLazyFrame {
         how: Wrap<JoinType>,
         suffix: String,
         validate: Wrap<JoinValidation>,
+        coalesce: Option<bool>,
     ) -> PyResult<Self> {
+        let coalesce = match coalesce {
+            None => JoinCoalesce::JoinSpecific,
+            Some(true) => JoinCoalesce::CoalesceColumns,
+            Some(false) => JoinCoalesce::KeepColumns,
+        };
         let ldf = self.ldf.clone();
         let other = other.ldf;
         let left_on = left_on
@@ -895,6 +907,7 @@ impl PyLazyFrame {
             .force_parallel(force_parallel)
             .join_nulls(join_nulls)
             .how(how.0)
+            .coalesce(coalesce)
             .validate(validate.0)
             .suffix(suffix)
             .finish()
@@ -940,58 +953,52 @@ impl PyLazyFrame {
         ldf.fill_nan(fill_value.inner).into()
     }
 
-    fn min(&self) -> PyResult<Self> {
+    fn min(&self) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf.min().map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.min();
+        out.into()
     }
 
-    fn max(&self) -> PyResult<Self> {
+    fn max(&self) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf.max().map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.max();
+        out.into()
     }
 
-    fn sum(&self) -> PyResult<Self> {
+    fn sum(&self) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf.sum().map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.sum();
+        out.into()
     }
 
-    fn mean(&self) -> PyResult<Self> {
+    fn mean(&self) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf.mean().map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.mean();
+        out.into()
     }
 
-    fn std(&self, ddof: u8) -> PyResult<Self> {
+    fn std(&self, ddof: u8) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf.std(ddof).map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.std(ddof);
+        out.into()
     }
 
-    fn var(&self, ddof: u8) -> PyResult<Self> {
+    fn var(&self, ddof: u8) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf.var(ddof).map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.var(ddof);
+        out.into()
     }
 
-    fn median(&self) -> PyResult<Self> {
+    fn median(&self) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf.median().map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.median();
+        out.into()
     }
 
-    fn quantile(
-        &self,
-        quantile: PyExpr,
-        interpolation: Wrap<QuantileInterpolOptions>,
-    ) -> PyResult<Self> {
+    fn quantile(&self, quantile: PyExpr, interpolation: Wrap<QuantileInterpolOptions>) -> Self {
         let ldf = self.ldf.clone();
-        let out = ldf
-            .quantile(quantile.inner, interpolation.0)
-            .map_err(PyPolarsErr::from)?;
-        Ok(out.into())
+        let out = ldf.quantile(quantile.inner, interpolation.0);
+        out.into()
     }
 
     fn explode(&self, column: Vec<PyExpr>) -> Self {

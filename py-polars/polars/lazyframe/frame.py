@@ -76,7 +76,7 @@ from polars.datatypes import (
     is_polars_dtype,
     py_type_to_dtype,
 )
-from polars.dependencies import subprocess
+from polars.dependencies import import_optional, subprocess
 from polars.io.csv._utils import _check_arg_is_1byte
 from polars.lazyframe.group_by import LazyGroupBy
 from polars.lazyframe.in_process import InProcessQuery
@@ -357,6 +357,14 @@ class LazyFrame:
             objects that have a `read()` method, such as a file handler (e.g.
             via builtin `open` function) or `BytesIO`).
 
+        Warnings
+        --------
+            This function uses :mod:`pickle` under some circumstances, and as
+            such inherits the security implications. Deserializing can execute
+            arbitrary code so it should only be attempted on trusted data.
+            pickle is only used when the logical plan contains python UDFs.
+
+
         See Also
         --------
         LazyFrame.serialize
@@ -518,15 +526,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
     def __repr__(self) -> str:
         # don't expose internal/private classpath
-        width = self.width
-        cols_str = "{} col{}".format(width, "" if width == 1 else "s")
-        schema_max_2 = (
-            item for i, item in enumerate(self.schema.items()) if i in (0, width - 1)
-        )
-        schema_str = (", " if width == 2 else " … ").join(
-            (f'"{k}": {v}' for k, v in schema_max_2)
-        )
-        return f"<{self.__class__.__name__} [{cols_str}, {{{schema_str}}}] at 0x{id(self):X}>"
+        return f"<{self.__class__.__name__} at 0x{id(self):X}>"
 
     def _repr_html_(self) -> str:
         try:
@@ -574,7 +574,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         >>> lf = pl.LazyFrame({"a": [1, 2, 3]}).sum()
         >>> json = lf.serialize()
         >>> json
-        '{"Select":{"expr":[{"Agg":{"Sum":{"Column":"a"}}}],"input":{"DataFrameScan":{"df":{"columns":[{"name":"a","datatype":"Int64","bit_settings":"","values":[1,2,3]}]},"schema":{"inner":{"a":"Int64"}},"output_schema":null,"projection":null,"selection":null}},"schema":{"inner":{"a":"Int64"}},"options":{"run_parallel":true,"duplicate_check":true}}}'
+        '{"MapFunction":{"input":{"DataFrameScan":{"df":{"columns":[{"name":"a","datatype":"Int64","bit_settings":"","values":[1,2,3]}]},"schema":{"inner":{"a":"Int64"}},"output_schema":null,"projection":null,"selection":null}},"function":{"Stats":"Sum"}}}'
 
         The logical plan can later be deserialized back into a LazyFrame.
 
@@ -973,7 +973,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         streaming: bool = False,
     ) -> str | None:
         """
-        Show a plot of the query plan. Note that you should have graphviz installed.
+        Show a plot of the query plan.
+
+        Note that graphviz must be installed to render the visualization (if not
+        already present you can download it here: <https://graphviz.org/download>`_).
 
         Parameters
         ----------
@@ -1042,7 +1045,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                 ["dot", "-Nshape=box", "-T" + output_type], input=f"{dot}".encode()
             )
         except (ImportError, FileNotFoundError):
-            msg = "Graphviz dot binary should be on your PATH"
+            msg = (
+                "The graphviz `dot` binary should be on your PATH."
+                "(If not installed you can download here: https://graphviz.org/download/)"
+            )
             raise ImportError(msg) from None
 
         if output_path:
@@ -1056,12 +1062,14 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
             return display(SVG(graph))
         else:
-            try:
-                import matplotlib.image as mpimg
-                import matplotlib.pyplot as plt
-            except ImportError:
-                msg = "matplotlib should be installed to show graph"
-                raise ModuleNotFoundError(msg) from None
+            import_optional(
+                "matplotlib",
+                err_prefix="",
+                err_suffix="should be installed to show graphs",
+            )
+            import matplotlib.image as mpimg
+            import matplotlib.pyplot as plt
+
             plt.figure(figsize=figsize)
             img = mpimg.imread(BytesIO(graph))
             plt.imshow(img)
@@ -1083,7 +1091,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         ...     .inspect()  # print the node before the filter
         ...     .filter(pl.col("bar") == pl.col("foo"))
         ... )  # doctest: +ELLIPSIS
-        <LazyFrame [2 cols, {"foo": Int64, "bar": Int64}] at ...>
+        <LazyFrame at ...>
         """
 
         def inspect(s: DataFrame) -> DataFrame:
@@ -1210,6 +1218,111 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                 by, descending, nulls_last, maintain_order, multithreaded
             )
         )
+
+    def sql(self, query: str, *, table_name: str | None = None) -> Self:
+        """
+        Execute a SQL query against the LazyFrame.
+
+        .. warning::
+            This functionality is considered **unstable**, although it is close to
+            being considered stable. It may be changed at any point without it being
+            considered a breaking change.
+
+        Parameters
+        ----------
+        query
+            SQL query to execute.
+        table_name
+            Optionally provide an explicit name for the table that represents the
+            calling frame (the alias "self" will always be registered/available).
+
+        Notes
+        -----
+        * The calling frame is automatically registered as a table in the SQL context
+          under the name "self". All DataFrames and LazyFrames found in the current
+          set of global variables are also registered, using their variable name.
+        * More control over registration and execution behaviour is available by
+          using the :class:`SQLContext` object.
+
+        See Also
+        --------
+        SQLContext
+
+        Examples
+        --------
+        >>> lf1 = pl.LazyFrame({"a": [1, 2, 3], "b": [6, 7, 8], "c": ["z", "y", "x"]})
+        >>> lf2 = pl.LazyFrame({"a": [3, 2, 1], "d": [125, -654, 888]})
+
+        Query the LazyFrame using SQL:
+
+        >>> lf1.sql("SELECT c, b FROM self WHERE a > 1").collect()
+        shape: (2, 2)
+        ┌─────┬─────┐
+        │ c   ┆ b   │
+        │ --- ┆ --- │
+        │ str ┆ i64 │
+        ╞═════╪═════╡
+        │ y   ┆ 7   │
+        │ x   ┆ 8   │
+        └─────┴─────┘
+
+        Join two LazyFrames:
+
+        >>> lf1.sql(
+        ...     '''
+        ...     SELECT self.*, d
+        ...     FROM self
+        ...     INNER JOIN lf2 USING (a)
+        ...     WHERE a > 1 AND b < 8
+        ...     '''
+        ... ).collect()
+        shape: (1, 4)
+        ┌─────┬─────┬─────┬──────┐
+        │ a   ┆ b   ┆ c   ┆ d    │
+        │ --- ┆ --- ┆ --- ┆ ---  │
+        │ i64 ┆ i64 ┆ str ┆ i64  │
+        ╞═════╪═════╪═════╪══════╡
+        │ 2   ┆ 7   ┆ y   ┆ -654 │
+        └─────┴─────┴─────┴──────┘
+
+        Apply SQL transforms (aliasing "self" to "frame") and subsequently
+        filter natively (you can freely mix SQL and native operations):
+
+        >>> lf1.sql(
+        ...     query='''
+        ...         SELECT
+        ...             a,
+        ...             (a % 2 == 0) AS a_is_even,
+        ...             (b::float4 / 2) AS "b/2",
+        ...             CONCAT_WS(':', c, c, c) AS c_c_c
+        ...         FROM frame
+        ...         ORDER BY a
+        ...     ''',
+        ...     table_name="frame",
+        ... ).filter(~pl.col("c_c_c").str.starts_with("x")).collect()
+        shape: (2, 4)
+        ┌─────┬───────────┬─────┬───────┐
+        │ a   ┆ a_is_even ┆ b/2 ┆ c_c_c │
+        │ --- ┆ ---       ┆ --- ┆ ---   │
+        │ i64 ┆ bool      ┆ f32 ┆ str   │
+        ╞═════╪═══════════╪═════╪═══════╡
+        │ 1   ┆ false     ┆ 3.0 ┆ z:z:z │
+        │ 2   ┆ true      ┆ 3.5 ┆ y:y:y │
+        └─────┴───────────┴─────┴───────┘
+        """
+        from polars.sql import SQLContext
+
+        issue_unstable_warning(
+            "`sql` is considered **unstable** (although it is close to being considered stable)."
+        )
+        with SQLContext(
+            register_globals=True,
+            eager_execution=False,
+        ) as ctx:
+            frames = {table_name: self} if table_name else {}
+            frames["self"] = self
+            ctx.register_many(frames)
+            return ctx.execute(query)  # type: ignore[return-value]
 
     def top_k(
         self,
@@ -1493,44 +1606,41 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         (df, timings) = wrap_df(df), wrap_df(timings)
 
         if show_plot:
-            try:
-                import matplotlib.pyplot as plt
+            import_optional(
+                "matplotlib",
+                err_suffix="should be installed to show profiling plots",
+            )
+            import matplotlib.pyplot as plt
 
-                fig, ax = plt.subplots(1, figsize=figsize)
+            fig, ax = plt.subplots(1, figsize=figsize)
 
-                max_val = timings["end"][-1]
-                timings_ = timings.reverse()
+            max_val = timings["end"][-1]
+            timings_ = timings.reverse()
 
-                if max_val > 1e9:
-                    unit = "s"
-                    timings_ = timings_.with_columns(
-                        F.col(["start", "end"]) / 1_000_000
-                    )
-                elif max_val > 1e6:
-                    unit = "ms"
-                    timings_ = timings_.with_columns(F.col(["start", "end"]) / 1000)
-                else:
-                    unit = "us"
-                if truncate_nodes > 0:
-                    timings_ = timings_.with_columns(
-                        F.col("node").str.slice(0, truncate_nodes) + "..."
-                    )
-
-                max_in_unit = timings_["end"][0]
-                ax.barh(
-                    timings_["node"],
-                    width=timings_["end"] - timings_["start"],
-                    left=timings_["start"],
+            if max_val > 1e9:
+                unit = "s"
+                timings_ = timings_.with_columns(F.col(["start", "end"]) / 1_000_000)
+            elif max_val > 1e6:
+                unit = "ms"
+                timings_ = timings_.with_columns(F.col(["start", "end"]) / 1000)
+            else:
+                unit = "us"
+            if truncate_nodes > 0:
+                timings_ = timings_.with_columns(
+                    F.col("node").str.slice(0, truncate_nodes) + "..."
                 )
 
-                plt.title("Profiling result")
-                ax.set_xlabel(f"node duration in [{unit}], total {max_in_unit}{unit}")
-                ax.set_ylabel("nodes")
-                plt.show()
+            max_in_unit = timings_["end"][0]
+            ax.barh(
+                timings_["node"],
+                width=timings_["end"] - timings_["start"],
+                left=timings_["start"],
+            )
 
-            except ImportError:
-                msg = "matplotlib should be installed to show profiling plot"
-                raise ModuleNotFoundError(msg) from None
+            plt.title("Profiling result")
+            ax.set_xlabel(f"node duration in [{unit}], total {max_in_unit}{unit}")
+            ax.set_ylabel("nodes")
+            plt.show()
 
         return df, timings
 
@@ -2383,7 +2493,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         ...     }
         ... )
         >>> lf.lazy()  # doctest: +ELLIPSIS
-        <LazyFrame [3 cols, {"a": Int64 … "c": Boolean}] at ...>
+        <LazyFrame at ...>
         """
         return self
 
@@ -2563,7 +2673,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         ...     }
         ... )
         >>> lf.clone()  # doctest: +ELLIPSIS
-        <LazyFrame [3 cols, {"a": Int64 … "c": Boolean}] at ...>
+        <LazyFrame at ...>
         """
         return self._from_pyldf(self._ldf.clone())
 
@@ -3579,7 +3689,6 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                 - 1mo   (1 calendar month)
                 - 1q    (1 calendar quarter)
                 - 1y    (1 calendar year)
-                - 1i    (1 index count)
 
                 Or combine them:
                 "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
@@ -3754,7 +3863,6 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             .. note::
 
                 - This is currently not supported the streaming engine.
-                - This is only supported when joined by single columns.
         join_nulls
             Join on null values. By default null values will never produce matches.
         allow_parallel
@@ -3866,6 +3974,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             msg = "must specify `on` OR `left_on` and `right_on`"
             raise ValueError(msg)
 
+        coalesce = None
+        if how == "outer_coalesce":
+            coalesce = True
+
         return self._from_pyldf(
             self._ldf.join(
                 other._ldf,
@@ -3877,6 +3989,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                 how,
                 suffix,
                 validate,
+                coalesce,
             )
         )
 
@@ -4704,7 +4817,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         """
         Add a column at index 0 that counts the rows.
 
-        .. deprecated::
+        .. deprecated:: 0.20.4
             Use :meth:`with_row_index` instead.
             Note that the default column name has changed from 'row_nr' to 'index'.
 

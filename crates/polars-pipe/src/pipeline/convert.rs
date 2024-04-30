@@ -18,7 +18,7 @@ use crate::executors::{operators, sources};
 use crate::expressions::PhysicalPipedExpr;
 use crate::operators::{Operator, Sink as SinkTrait, Source};
 use crate::pipeline::dispatcher::ThreadedSink;
-use crate::pipeline::PipeLine;
+use crate::pipeline::{PhysOperator, PipeLine};
 
 pub type CallBacks = PlHashMap<Node, PlaceHolder>;
 
@@ -285,12 +285,12 @@ where
                     };
 
                     match jt {
-                        join_type @ JoinType::Inner | join_type @ JoinType::Left => {
+                        JoinType::Inner | JoinType::Left => {
                             let (join_columns_left, join_columns_right) = swap_eval();
 
                             Box::new(GenericBuild::<()>::new(
                                 Arc::from(options.args.suffix()),
-                                join_type.clone(),
+                                options.args.clone(),
                                 swapped,
                                 join_columns_left,
                                 join_columns_right,
@@ -317,7 +317,7 @@ where
 
                             Box::new(GenericBuild::<Tracker>::new(
                                 Arc::from(options.args.suffix()),
-                                jt.clone(),
+                                options.args.clone(),
                                 swapped,
                                 join_columns_left,
                                 join_columns_right,
@@ -758,7 +758,9 @@ where
 
     Ok(PipeLine::new(
         source_objects,
-        unsafe { std::mem::transmute(operator_objects) },
+        unsafe {
+            std::mem::transmute::<Vec<Box<dyn Operator>>, Vec<PhysOperator>>(operator_objects)
+        },
         sinks,
         verbose,
     ))

@@ -23,6 +23,7 @@ pub struct ApplyExpr {
     allow_threading: bool,
     check_lengths: bool,
     allow_group_aware: bool,
+    output_dtype: Option<DataType>,
 }
 
 impl ApplyExpr {
@@ -33,6 +34,7 @@ impl ApplyExpr {
         options: FunctionOptions,
         allow_threading: bool,
         input_schema: Option<SchemaRef>,
+        output_dtype: Option<DataType>,
     ) -> Self {
         #[cfg(debug_assertions)]
         if matches!(options.collect_groups, ApplyOptions::ElementWise) && options.returns_scalar {
@@ -51,6 +53,7 @@ impl ApplyExpr {
             allow_threading,
             check_lengths: options.check_lengths(),
             allow_group_aware: options.allow_group_aware,
+            output_dtype,
         }
     }
 
@@ -72,6 +75,7 @@ impl ApplyExpr {
             allow_threading: true,
             check_lengths: true,
             allow_group_aware: true,
+            output_dtype: None,
         }
     }
 
@@ -162,13 +166,27 @@ impl ApplyExpr {
         };
 
         let ca: ListChunked = if self.allow_threading {
-            POOL.install(|| {
-                agg.list()
-                    .unwrap()
-                    .par_iter()
-                    .map(f)
-                    .collect::<PolarsResult<_>>()
-            })?
+            let dtype = match &self.output_dtype {
+                Some(dtype) if dtype.is_known() && !dtype.is_null() => Some(dtype.clone()),
+                _ => None,
+            };
+
+            let lst = agg.list().unwrap();
+            let iter = lst.par_iter().map(f);
+
+            if let Some(dtype) = dtype {
+                // TODO! uncomment this line and remove debug_assertion after a while.
+                // POOL.install(|| {
+                //     iter.collect_ca_with_dtype::<PolarsResult<_>>("", DataType::List(Box::new(dtype)))
+                // })?
+                let out: ListChunked = POOL.install(|| iter.collect::<PolarsResult<_>>())?;
+
+                debug_assert_eq!(out.dtype(), &DataType::List(Box::new(dtype)));
+
+                out
+            } else {
+                POOL.install(|| iter.collect::<PolarsResult<_>>())?
+            }
         } else {
             agg.list()
                 .unwrap()
@@ -354,11 +372,19 @@ impl PhysicalExpr for ApplyExpr {
                 },
                 ApplyOptions::GroupWise => self.apply_multiple_group_aware(acs, df),
                 ApplyOptions::ElementWise => {
-                    if acs
-                        .iter()
-                        .any(|ac| matches!(ac.agg_state(), AggState::AggregatedList(_)))
-                    {
-                        self.apply_multiple_group_aware(acs, df)
+                    let mut has_agg_list = false;
+                    let mut has_agg_scalar = false;
+                    let mut has_not_agg = false;
+                    for ac in &acs {
+                        match ac.state {
+                            AggState::AggregatedList(_) => has_agg_list = true,
+                            AggState::AggregatedScalar(_) => has_agg_scalar = true,
+                            AggState::NotAggregated(_) => has_not_agg = true,
+                            _ => {},
+                        }
+                    }
+                    if has_agg_list || (has_agg_scalar && has_not_agg) {
+                        return self.apply_multiple_group_aware(acs, df);
                     } else {
                         apply_multiple_elementwise(
                             acs,
@@ -429,6 +455,7 @@ fn apply_multiple_elementwise<'a>(
         },
         first_as => {
             let check_lengths = check_lengths && !matches!(first_as, AggState::Literal(_));
+            let aggregated = acs.iter().all(|ac| ac.is_aggregated() | ac.is_literal());
             let mut s = acs
                 .iter_mut()
                 .enumerate()
@@ -451,7 +478,7 @@ fn apply_multiple_elementwise<'a>(
 
             // Take the first aggregation context that as that is the input series.
             let mut ac = acs.swap_remove(0);
-            ac.with_series_and_args(s, false, None, true)?;
+            ac.with_series_and_args(s, aggregated, None, true)?;
             Ok(ac)
         },
     }

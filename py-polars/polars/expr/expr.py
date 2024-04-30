@@ -293,7 +293,8 @@ class Expr:
         if method != "__call__":
             msg = f"Only call is implemented not {method}"
             raise NotImplementedError(msg)
-        is_custom_ufunc = ufunc.__class__ != np.ufunc
+        # Numpy/Scipy ufuncs have signature None but numba signatures always exists.
+        is_custom_ufunc = getattr(ufunc, "signature") is not None  # noqa: B009
         num_expr = sum(isinstance(inp, Expr) for inp in inputs)
         exprs = [
             (inp, Expr, i) if isinstance(inp, Expr) else (inp, None, i)
@@ -343,6 +344,13 @@ class Expr:
             Path to a file or a file-like object (by file-like object, we refer to
             objects that have a `read()` method, such as a file handler (e.g.
             via builtin `open` function) or `BytesIO`).
+
+        Warnings
+        --------
+            This function uses :mod:`pickle` under some circumstances, and as
+            such inherits the security implications. Deserializing can execute
+            arbitrary code so it should only be attempted on trusted data.
+            pickle is only used when the logical plan contains python UDFs.
 
         See Also
         --------
@@ -2023,7 +2031,16 @@ class Expr:
         """
         return self._from_pyexpr(self._pyexpr.sort_with(descending, nulls_last))
 
-    def top_k(self, k: int | IntoExprColumn = 5) -> Self:
+    def top_k(
+        self,
+        k: int | IntoExprColumn = 5,
+        *,
+        by: IntoExpr | Iterable[IntoExpr] | None = None,
+        descending: bool | Sequence[bool] = False,
+        nulls_last: bool = False,
+        maintain_order: bool = False,
+        multithreaded: bool = True,
+    ) -> Self:
         r"""
         Return the `k` largest elements.
 
@@ -2035,6 +2052,19 @@ class Expr:
         ----------
         k
             Number of elements to return.
+        by
+            Column(s) included in sort order. Accepts expression input.
+            Strings are parsed as column names.
+            If not provided, each column will be treated induvidually.
+        descending
+            Return the k smallest. Top-k by multiple columns can be specified per
+            column by passing a sequence of booleans.
+        nulls_last
+            Place null values last.
+        maintain_order
+            Whether the order should be maintained if elements are equal.
+        multithreaded
+            Sort using multiple threads.
 
         See Also
         --------
@@ -2042,6 +2072,8 @@ class Expr:
 
         Examples
         --------
+        Get the 5 largest values in series.
+
         >>> df = pl.DataFrame(
         ...     {
         ...         "value": [1, 98, 2, 3, 99, 4],
@@ -2065,11 +2097,116 @@ class Expr:
         │ 3     ┆ 4        │
         │ 2     ┆ 98       │
         └───────┴──────────┘
+
+        >>> df2 = pl.DataFrame(
+        ...     {
+        ...         "a": [1, 2, 3, 4, 5, 6],
+        ...         "b": [6, 5, 4, 3, 2, 1],
+        ...         "c": ["Apple", "Orange", "Apple", "Apple", "Banana", "Banana"],
+        ...     }
+        ... )
+        >>> df2
+        shape: (6, 3)
+        ┌─────┬─────┬────────┐
+        │ a   ┆ b   ┆ c      │
+        │ --- ┆ --- ┆ ---    │
+        │ i64 ┆ i64 ┆ str    │
+        ╞═════╪═════╪════════╡
+        │ 1   ┆ 6   ┆ Apple  │
+        │ 2   ┆ 5   ┆ Orange │
+        │ 3   ┆ 4   ┆ Apple  │
+        │ 4   ┆ 3   ┆ Apple  │
+        │ 5   ┆ 2   ┆ Banana │
+        │ 6   ┆ 1   ┆ Banana │
+        └─────┴─────┴────────┘
+
+        Get the top 2 rows by column `a` or `b`.
+
+        >>> df2.select(
+        ...     pl.all().top_k(2, by="a").name.suffix("_top_by_a"),
+        ...     pl.all().top_k(2, by="b").name.suffix("_top_by_b"),
+        ... )
+        shape: (2, 6)
+        ┌────────────┬────────────┬────────────┬────────────┬────────────┬────────────┐
+        │ a_top_by_a ┆ b_top_by_a ┆ c_top_by_a ┆ a_top_by_b ┆ b_top_by_b ┆ c_top_by_b │
+        │ ---        ┆ ---        ┆ ---        ┆ ---        ┆ ---        ┆ ---        │
+        │ i64        ┆ i64        ┆ str        ┆ i64        ┆ i64        ┆ str        │
+        ╞════════════╪════════════╪════════════╪════════════╪════════════╪════════════╡
+        │ 6          ┆ 1          ┆ Banana     ┆ 1          ┆ 6          ┆ Apple      │
+        │ 5          ┆ 2          ┆ Banana     ┆ 2          ┆ 5          ┆ Orange     │
+        └────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘
+
+        Get the top 2 rows by multiple columns with given order.
+
+        >>> df2.select(
+        ...     pl.all()
+        ...     .top_k(2, by=["c", "a"], descending=[False, True])
+        ...     .name.suffix("_by_ca"),
+        ...     pl.all()
+        ...     .top_k(2, by=["c", "b"], descending=[False, True])
+        ...     .name.suffix("_by_cb"),
+        ... )
+        shape: (2, 6)
+        ┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐
+        │ a_by_ca ┆ b_by_ca ┆ c_by_ca ┆ a_by_cb ┆ b_by_cb ┆ c_by_cb │
+        │ ---     ┆ ---     ┆ ---     ┆ ---     ┆ ---     ┆ ---     │
+        │ i64     ┆ i64     ┆ str     ┆ i64     ┆ i64     ┆ str     │
+        ╞═════════╪═════════╪═════════╪═════════╪═════════╪═════════╡
+        │ 2       ┆ 5       ┆ Orange  ┆ 2       ┆ 5       ┆ Orange  │
+        │ 5       ┆ 2       ┆ Banana  ┆ 6       ┆ 1       ┆ Banana  │
+        └─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘
+
+        Get the top 2 rows by column `a` in each group.
+
+        >>> (
+        ...     df2.group_by("c", maintain_order=True)
+        ...     .agg(pl.all().top_k(2, by="a"))
+        ...     .explode(pl.all().exclude("c"))
+        ... )
+        shape: (5, 3)
+        ┌────────┬─────┬─────┐
+        │ c      ┆ a   ┆ b   │
+        │ ---    ┆ --- ┆ --- │
+        │ str    ┆ i64 ┆ i64 │
+        ╞════════╪═════╪═════╡
+        │ Apple  ┆ 4   ┆ 3   │
+        │ Apple  ┆ 3   ┆ 4   │
+        │ Orange ┆ 2   ┆ 5   │
+        │ Banana ┆ 6   ┆ 1   │
+        │ Banana ┆ 5   ┆ 2   │
+        └────────┴─────┴─────┘
         """
         k = parse_as_expression(k)
-        return self._from_pyexpr(self._pyexpr.top_k(k))
+        if by is not None:
+            by = parse_as_list_of_expressions(by)
+            if isinstance(descending, bool):
+                descending = [descending]
+            elif len(by) != len(descending):
+                msg = f"the length of `descending` ({len(descending)}) does not match the length of `by` ({len(by)})"
+                raise ValueError(msg)
+            return self._from_pyexpr(
+                self._pyexpr.top_k_by(
+                    k, by, descending, nulls_last, maintain_order, multithreaded
+                )
+            )
+        else:
+            if not isinstance(descending, bool):
+                msg = "`descending` should be a boolean if no `by` is provided"
+                raise ValueError(msg)
+            return self._from_pyexpr(
+                self._pyexpr.top_k(k, descending, nulls_last, multithreaded)
+            )
 
-    def bottom_k(self, k: int | IntoExprColumn = 5) -> Self:
+    def bottom_k(
+        self,
+        k: int | IntoExprColumn = 5,
+        *,
+        by: IntoExpr | Iterable[IntoExpr] | None = None,
+        descending: bool | Sequence[bool] = False,
+        nulls_last: bool = False,
+        maintain_order: bool = False,
+        multithreaded: bool = True,
+    ) -> Self:
         r"""
         Return the `k` smallest elements.
 
@@ -2081,6 +2218,19 @@ class Expr:
         ----------
         k
             Number of elements to return.
+        by
+            Column(s) included in sort order.
+            Accepts expression input. Strings are parsed as column names.
+            If not provided, each column will be treated induvidually.
+        descending
+            Return the k largest. Bottom-k by multiple columns can be specified per
+            column by passing a sequence of booleans.
+        nulls_last
+            Place null values last.
+        maintain_order
+            Whether the order should be maintained if elements are equal.
+        multithreaded
+            Sort using multiple threads.
 
         See Also
         --------
@@ -2111,9 +2261,105 @@ class Expr:
         │ 3     ┆ 4        │
         │ 2     ┆ 98       │
         └───────┴──────────┘
+
+        >>> df2 = pl.DataFrame(
+        ...     {
+        ...         "a": [1, 2, 3, 4, 5, 6],
+        ...         "b": [6, 5, 4, 3, 2, 1],
+        ...         "c": ["Apple", "Orange", "Apple", "Apple", "Banana", "Banana"],
+        ...     }
+        ... )
+        >>> df2
+        shape: (6, 3)
+        ┌─────┬─────┬────────┐
+        │ a   ┆ b   ┆ c      │
+        │ --- ┆ --- ┆ ---    │
+        │ i64 ┆ i64 ┆ str    │
+        ╞═════╪═════╪════════╡
+        │ 1   ┆ 6   ┆ Apple  │
+        │ 2   ┆ 5   ┆ Orange │
+        │ 3   ┆ 4   ┆ Apple  │
+        │ 4   ┆ 3   ┆ Apple  │
+        │ 5   ┆ 2   ┆ Banana │
+        │ 6   ┆ 1   ┆ Banana │
+        └─────┴─────┴────────┘
+
+        Get the bottom 2 rows by column `a` or `b`.
+
+        >>> df2.select(
+        ...     pl.all().bottom_k(2, by="a").name.suffix("_btm_by_a"),
+        ...     pl.all().bottom_k(2, by="b").name.suffix("_btm_by_b"),
+        ... )
+        shape: (2, 6)
+        ┌────────────┬────────────┬────────────┬────────────┬────────────┬────────────┐
+        │ a_btm_by_a ┆ b_btm_by_a ┆ c_btm_by_a ┆ a_btm_by_b ┆ b_btm_by_b ┆ c_btm_by_b │
+        │ ---        ┆ ---        ┆ ---        ┆ ---        ┆ ---        ┆ ---        │
+        │ i64        ┆ i64        ┆ str        ┆ i64        ┆ i64        ┆ str        │
+        ╞════════════╪════════════╪════════════╪════════════╪════════════╪════════════╡
+        │ 1          ┆ 6          ┆ Apple      ┆ 6          ┆ 1          ┆ Banana     │
+        │ 2          ┆ 5          ┆ Orange     ┆ 5          ┆ 2          ┆ Banana     │
+        └────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘
+
+        Get the bottom 2 rows by multiple columns with given order.
+
+        >>> df2.select(
+        ...     pl.all()
+        ...     .bottom_k(2, by=["c", "a"], descending=[False, True])
+        ...     .name.suffix("_by_ca"),
+        ...     pl.all()
+        ...     .bottom_k(2, by=["c", "b"], descending=[False, True])
+        ...     .name.suffix("_by_cb"),
+        ... )
+        shape: (2, 6)
+        ┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐
+        │ a_by_ca ┆ b_by_ca ┆ c_by_ca ┆ a_by_cb ┆ b_by_cb ┆ c_by_cb │
+        │ ---     ┆ ---     ┆ ---     ┆ ---     ┆ ---     ┆ ---     │
+        │ i64     ┆ i64     ┆ str     ┆ i64     ┆ i64     ┆ str     │
+        ╞═════════╪═════════╪═════════╪═════════╪═════════╪═════════╡
+        │ 4       ┆ 3       ┆ Apple   ┆ 1       ┆ 6       ┆ Apple   │
+        │ 3       ┆ 4       ┆ Apple   ┆ 3       ┆ 4       ┆ Apple   │
+        └─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘
+
+        Get the bottom 2 rows by column `a` in each group.
+
+        >>> (
+        ...     df2.group_by("c", maintain_order=True)
+        ...     .agg(pl.all().bottom_k(2, by="a"))
+        ...     .explode(pl.all().exclude("c"))
+        ... )
+        shape: (5, 3)
+        ┌────────┬─────┬─────┐
+        │ c      ┆ a   ┆ b   │
+        │ ---    ┆ --- ┆ --- │
+        │ str    ┆ i64 ┆ i64 │
+        ╞════════╪═════╪═════╡
+        │ Apple  ┆ 1   ┆ 6   │
+        │ Apple  ┆ 3   ┆ 4   │
+        │ Orange ┆ 2   ┆ 5   │
+        │ Banana ┆ 5   ┆ 2   │
+        │ Banana ┆ 6   ┆ 1   │
+        └────────┴─────┴─────┘
         """
         k = parse_as_expression(k)
-        return self._from_pyexpr(self._pyexpr.bottom_k(k))
+        if by is not None:
+            by = parse_as_list_of_expressions(by)
+            if isinstance(descending, bool):
+                descending = [descending]
+            elif len(by) != len(descending):
+                msg = f"the length of `descending` ({len(descending)}) does not match the length of `by` ({len(by)})"
+                raise ValueError(msg)
+            return self._from_pyexpr(
+                self._pyexpr.bottom_k_by(
+                    k, by, descending, nulls_last, maintain_order, multithreaded
+                )
+            )
+        else:
+            if not isinstance(descending, bool):
+                msg = "`descending` should be a boolean if no `by` is provided"
+                raise ValueError(msg)
+            return self._from_pyexpr(
+                self._pyexpr.bottom_k(k, descending, nulls_last, multithreaded)
+            )
 
     def arg_sort(self, *, descending: bool = False, nulls_last: bool = False) -> Self:
         """
@@ -2218,7 +2464,9 @@ class Expr:
         """
         return self._from_pyexpr(self._pyexpr.arg_min())
 
-    def search_sorted(self, element: IntoExpr, side: SearchSortedSide = "any") -> Self:
+    def search_sorted(
+        self, element: IntoExpr | np.ndarray[Any, Any], side: SearchSortedSide = "any"
+    ) -> Self:
         """
         Find indices where elements should be inserted to maintain order.
 
@@ -2256,7 +2504,7 @@ class Expr:
         │ 0    ┆ 2     ┆ 4   │
         └──────┴───────┴─────┘
         """
-        element = parse_as_expression(element)
+        element = parse_as_expression(element, list_as_lit=False, str_as_lit=True)  # type: ignore[arg-type]
         return self._from_pyexpr(self._pyexpr.search_sorted(element, side))
 
     def sort_by(
@@ -8745,6 +8993,101 @@ class Expr:
         return self._from_pyexpr(
             self._pyexpr.ewm_mean(alpha, adjust, min_periods, ignore_nulls)
         )
+
+    def ewm_mean_by(
+        self,
+        by: str | IntoExpr,
+        *,
+        half_life: str | timedelta,
+        check_sorted: bool = True,
+    ) -> Self:
+        r"""
+        Calculate time-based exponentially weighted moving average.
+
+        Given observations :math:`x_1, x_2, \ldots, x_n` at times
+        :math:`t_1, t_2, \ldots, t_n`, the EWMA is calculated as
+
+            .. math::
+
+                y_0 &= x_0
+
+                \alpha_i &= \exp(-\lambda(t_i - t_{i-1}))
+
+                y_i &= \alpha_i x_i + (1 - \alpha_i) y_{i-1}; \quad i > 0
+
+        where :math:`\lambda` equals :math:`\ln(2) / \text{half_life}`.
+
+        Parameters
+        ----------
+        by
+            Times to calculate average by. Should be ``DateTime``, ``Date``, ``UInt64``,
+            ``UInt32``, ``Int64``, or ``Int32`` data type.
+        half_life
+            Unit over which observation decays to half its value.
+
+            Can be created either from a timedelta, or
+            by using the following string language:
+
+            - 1ns   (1 nanosecond)
+            - 1us   (1 microsecond)
+            - 1ms   (1 millisecond)
+            - 1s    (1 second)
+            - 1m    (1 minute)
+            - 1h    (1 hour)
+            - 1d    (1 day)
+            - 1w    (1 week)
+            - 1i    (1 index count)
+
+            Or combine them:
+            "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
+
+            Note that `half_life` is treated as a constant duration - calendar
+            durations such as months (or even days in the time-zone-aware case)
+            are not supported, please express your duration in an approximately
+            equivalent number of hours (e.g. '370h' instead of '1mo').
+        check_sorted
+            Check whether `by` column is sorted.
+            Incorrectly setting this to `False` will lead to incorrect output.
+
+        Returns
+        -------
+        Expr
+            Float32 if input is Float32, otherwise Float64.
+
+        Examples
+        --------
+        >>> from datetime import date, timedelta
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "values": [0, 1, 2, None, 4],
+        ...         "times": [
+        ...             date(2020, 1, 1),
+        ...             date(2020, 1, 3),
+        ...             date(2020, 1, 10),
+        ...             date(2020, 1, 15),
+        ...             date(2020, 1, 17),
+        ...         ],
+        ...     }
+        ... ).sort("times")
+        >>> df.with_columns(
+        ...     result=pl.col("values").ewm_mean_by("times", half_life="4d"),
+        ... )
+        shape: (5, 3)
+        ┌────────┬────────────┬──────────┐
+        │ values ┆ times      ┆ result   │
+        │ ---    ┆ ---        ┆ ---      │
+        │ i64    ┆ date       ┆ f64      │
+        ╞════════╪════════════╪══════════╡
+        │ 0      ┆ 2020-01-01 ┆ 0.0      │
+        │ 1      ┆ 2020-01-03 ┆ 0.292893 │
+        │ 2      ┆ 2020-01-10 ┆ 1.492474 │
+        │ null   ┆ 2020-01-15 ┆ null     │
+        │ 4      ┆ 2020-01-17 ┆ 3.254508 │
+        └────────┴────────────┴──────────┘
+        """
+        by = parse_as_expression(by)
+        half_life = parse_as_duration_string(half_life)
+        return self._from_pyexpr(self._pyexpr.ewm_mean_by(by, half_life, check_sorted))
 
     @deprecate_nonkeyword_arguments(version="0.19.10")
     def ewm_std(

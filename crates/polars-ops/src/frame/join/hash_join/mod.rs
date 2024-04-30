@@ -231,12 +231,13 @@ pub trait JoinDispatch: IntoDf {
         s_right: &Series,
         slice: Option<(i64, usize)>,
         anti: bool,
+        join_nulls: bool,
     ) -> PolarsResult<DataFrame> {
         let ca_self = self.to_df();
         #[cfg(feature = "dtype-categorical")]
         _check_categorical_src(s_left.dtype(), s_right.dtype())?;
 
-        let idx = s_left.hash_join_semi_anti(s_right, anti);
+        let idx = s_left.hash_join_semi_anti(s_right, anti, join_nulls);
         // SAFETY:
         // indices are in bounds
         Ok(unsafe { ca_self._finish_anti_semi_join(&idx, slice) })
@@ -270,9 +271,7 @@ pub trait JoinDispatch: IntoDf {
             || unsafe { other.take_unchecked(&idx_ca_r) },
         );
 
-        let JoinType::Outer { coalesce } = args.how else {
-            unreachable!()
-        };
+        let coalesce = args.coalesce.coalesce(&JoinType::Outer);
         let out = _finish_join(df_left, df_right, args.suffix.as_deref());
         if coalesce {
             Ok(_coalesce_outer_join(

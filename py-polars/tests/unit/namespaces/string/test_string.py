@@ -46,6 +46,128 @@ def test_str_slice_expr() -> None:
         df.select(pl.col("a").str.slice(0, -1))
 
 
+@pytest.mark.parametrize(
+    ("input", "n", "output"),
+    [
+        (["012345", "", None], 0, ["", "", None]),
+        (["012345", "", None], 2, ["01", "", None]),
+        (["012345", "", None], -2, ["0123", "", None]),
+        (["012345", "", None], 100, ["012345", "", None]),
+        (["012345", "", None], -100, ["", "", None]),
+    ],
+)
+def test_str_head(input: list[str], n: int, output: list[str]) -> None:
+    assert pl.Series(input).str.head(n).to_list() == output
+
+
+@pytest.mark.parametrize(
+    ("input", "n", "output"),
+    [
+        ("你好世界", 0, ""),
+        ("你好世界", 2, "你好"),
+        ("你好世界", 999, "你好世界"),
+        ("你好世界", -1, "你好世"),
+        ("你好世界", -2, "你好"),
+        ("你好世界", -999, ""),
+    ],
+)
+def test_str_head_codepoints(input: str, n: int, output: str) -> None:
+    assert pl.Series([input]).str.head(n).to_list() == [output]
+
+
+def test_str_head_expr() -> None:
+    s = "012345"
+    df = pl.DataFrame(
+        {"a": [s, s, s, s, s, s, "", None], "n": [0, 2, -2, 100, -100, None, 3, -2]}
+    )
+    out = df.select(
+        n_expr=pl.col("a").str.head("n"),
+        n_pos2=pl.col("a").str.head(2),
+        n_neg2=pl.col("a").str.head(-2),
+        n_pos100=pl.col("a").str.head(100),
+        n_pos_neg100=pl.col("a").str.head(-100),
+        n_pos_0=pl.col("a").str.head(0),
+        str_lit=pl.col("a").str.head(pl.lit(2)),
+        lit_expr=pl.lit(s).str.head("n"),
+        lit_n=pl.lit(s).str.head(2),
+    )
+    expected = pl.DataFrame(
+        {
+            "n_expr": ["", "01", "0123", "012345", "", None, "", None],
+            "n_pos2": ["01", "01", "01", "01", "01", "01", "", None],
+            "n_neg2": ["0123", "0123", "0123", "0123", "0123", "0123", "", None],
+            "n_pos100": [s, s, s, s, s, s, "", None],
+            "n_pos_neg100": ["", "", "", "", "", "", "", None],
+            "n_pos_0": ["", "", "", "", "", "", "", None],
+            "str_lit": ["01", "01", "01", "01", "01", "01", "", None],
+            "lit_expr": ["", "01", "0123", "012345", "", None, "012", "0123"],
+            "lit_n": ["01", "01", "01", "01", "01", "01", "01", "01"],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
+@pytest.mark.parametrize(
+    ("input", "n", "output"),
+    [
+        (["012345", "", None], 0, ["", "", None]),
+        (["012345", "", None], 2, ["45", "", None]),
+        (["012345", "", None], -2, ["2345", "", None]),
+        (["012345", "", None], 100, ["012345", "", None]),
+        (["012345", "", None], -100, ["", "", None]),
+    ],
+)
+def test_str_tail(input: list[str], n: int, output: list[str]) -> None:
+    assert pl.Series(input).str.tail(n).to_list() == output
+
+
+@pytest.mark.parametrize(
+    ("input", "n", "output"),
+    [
+        ("你好世界", 0, ""),
+        ("你好世界", 2, "世界"),
+        ("你好世界", 999, "你好世界"),
+        ("你好世界", -1, "好世界"),
+        ("你好世界", -2, "世界"),
+        ("你好世界", -999, ""),
+    ],
+)
+def test_str_tail_codepoints(input: str, n: int, output: str) -> None:
+    assert pl.Series([input]).str.tail(n).to_list() == [output]
+
+
+def test_str_tail_expr() -> None:
+    s = "012345"
+    df = pl.DataFrame(
+        {"a": [s, s, s, s, s, s, "", None], "n": [0, 2, -2, 100, -100, None, 3, -2]}
+    )
+    out = df.select(
+        n_expr=pl.col("a").str.tail("n"),
+        n_pos2=pl.col("a").str.tail(2),
+        n_neg2=pl.col("a").str.tail(-2),
+        n_pos100=pl.col("a").str.tail(100),
+        n_pos_neg100=pl.col("a").str.tail(-100),
+        n_pos_0=pl.col("a").str.tail(0),
+        str_lit=pl.col("a").str.tail(pl.lit(2)),
+        lit_expr=pl.lit(s).str.tail("n"),
+        lit_n=pl.lit(s).str.tail(2),
+    )
+    expected = pl.DataFrame(
+        {
+            "n_expr": ["", "45", "2345", "012345", "", None, "", None],
+            "n_pos2": ["45", "45", "45", "45", "45", "45", "", None],
+            "n_neg2": ["2345", "2345", "2345", "2345", "2345", "2345", "", None],
+            "n_pos100": [s, s, s, s, s, s, "", None],
+            "n_pos_neg100": ["", "", "", "", "", "", "", None],
+            "n_pos_0": ["", "", "", "", "", "", "", None],
+            "str_lit": ["45", "45", "45", "45", "45", "45", "", None],
+            "lit_expr": ["", "45", "2345", "012345", "", None, "345", "2345"],
+            "lit_n": ["45", "45", "45", "45", "45", "45", "45", "45"],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
 def test_str_slice_multibyte() -> None:
     ref = "你好世界"
     s = pl.Series([ref])
@@ -621,6 +743,34 @@ def test_jsonpath_single() -> None:
     s = pl.Series(['{"a":"1"}', None, '{"a":2}', '{"a":2.1}', '{"a":true}'])
     expected = pl.Series(["1", None, "2", "2.1", "true"])
     assert_series_equal(s.str.json_path_match("$.a"), expected)
+
+
+def test_json_path_match() -> None:
+    df = pl.DataFrame(
+        {
+            "str": [
+                '{"a":"1"}',
+                None,
+                '{"b":2}',
+                '{"a":2.1, "b": "hello"}',
+                '{"a":true}',
+            ],
+            "pat": ["$.a", "$.a", "$.b", "$.b", None],
+        }
+    )
+    out = df.select(
+        all_expr=pl.col("str").str.json_path_match(pl.col("pat")),
+        str_expr=pl.col("str").str.json_path_match("$.a"),
+        pat_expr=pl.lit('{"a": 1.1, "b": 10}').str.json_path_match(pl.col("pat")),
+    )
+    expected = pl.DataFrame(
+        {
+            "all_expr": ["1", None, "2", "hello", None],
+            "str_expr": ["1", None, None, "2.1", "true"],
+            "pat_expr": ["1.1", "1.1", "10", "10", None],
+        }
+    )
+    assert_frame_equal(out, expected)
 
 
 def test_extract_regex() -> None:

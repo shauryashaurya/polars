@@ -13,15 +13,12 @@ from polars._utils.various import (
 )
 from polars._utils.wrap import wrap_df, wrap_ldf
 from polars.convert import from_arrow
-from polars.dependencies import _PYARROW_AVAILABLE
+from polars.dependencies import import_optional
 from polars.io._utils import (
-    is_local_file,
-    is_supported_cloud,
     parse_columns_arg,
     parse_row_index_args,
     prepare_file_arg,
 )
-from polars.io.parquet.anonymous_scan import _scan_parquet_fsspec
 
 with contextlib.suppress(ImportError):
     from polars.polars import PyDataFrame, PyLazyFrame
@@ -44,6 +41,7 @@ def read_parquet(
     parallel: ParallelStrategy = "auto",
     use_statistics: bool = True,
     hive_partitioning: bool = True,
+    glob: bool = True,
     hive_schema: SchemaDict | None = None,
     rechunk: bool = True,
     low_memory: bool = False,
@@ -59,9 +57,9 @@ def read_parquet(
     Parameters
     ----------
     source
-        Path to a file, or a file-like object (by file-like object, we refer to objects
-        that have a `read()` method, such as a file handler (e.g. via builtin `open`
-        function) or `BytesIO`). If the path is a directory, files in that
+        Path to a file or a file-like object (by "file-like object" we refer to objects
+        that have a `read()` method, such as a file handler like the builtin `open`
+        function, or a `BytesIO` instance). If the path is a directory, files in that
         directory will all be read.
     columns
         Columns to select. Accepts a list of column indices (starting at zero) or a list
@@ -84,6 +82,8 @@ def read_parquet(
     hive_partitioning
         Infer statistics and schema from Hive partitioned URL and use them
         to prune reads.
+    glob
+        Expand path given via globbing rules.
     hive_schema
         The column names and data types of the columns by which the data is partitioned.
         If set to `None` (default), the schema of the Hive partitions is inferred.
@@ -162,8 +162,8 @@ def read_parquet(
             memory_map=memory_map,
         )
 
-    # Read binary types using `read_parquet`
-    elif isinstance(source, (io.BufferedIOBase, io.RawIOBase, bytes)):
+    # Read file and bytes inputs using `read_parquet`
+    elif isinstance(source, (io.IOBase, bytes)):
         return _read_parquet_binary(
             source,
             columns=columns,
@@ -191,6 +191,7 @@ def read_parquet(
         cache=False,
         storage_options=storage_options,
         retries=retries,
+        glob=glob,
     )
 
     if columns is not None:
@@ -209,13 +210,11 @@ def _read_parquet_with_pyarrow(
     pyarrow_options: dict[str, Any] | None = None,
     memory_map: bool = True,
 ) -> DataFrame:
-    if not _PYARROW_AVAILABLE:
-        msg = "'pyarrow' is required when using `read_parquet(..., use_pyarrow=True)`"
-        raise ModuleNotFoundError(msg)
-
-    import pyarrow as pa
-    import pyarrow.parquet
-
+    pyarrow_parquet = import_optional(
+        "pyarrow.parquet",
+        err_prefix="",
+        err_suffix="is required when using `read_parquet(..., use_pyarrow=True)`",
+    )
     pyarrow_options = pyarrow_options or {}
 
     with prepare_file_arg(
@@ -223,7 +222,7 @@ def _read_parquet_with_pyarrow(
         use_pyarrow=True,
         storage_options=storage_options,
     ) as source_prep:
-        pa_table = pa.parquet.read_table(
+        pa_table = pyarrow_parquet.read_table(
             source_prep,
             memory_map=memory_map,
             columns=columns,
@@ -269,9 +268,9 @@ def read_parquet_schema(source: str | Path | IO[bytes] | bytes) -> dict[str, Dat
     Parameters
     ----------
     source
-        Path to a file or a file-like object (by file-like object, we refer to objects
-        that have a `read()` method, such as a file handler (e.g. via builtin `open`
-        function) or `BytesIO`).
+        Path to a file or a file-like object (by "file-like object" we refer to objects
+        that have a `read()` method, such as a file handler like the builtin `open`
+        function, or a `BytesIO` instance).
 
     Returns
     -------
@@ -295,6 +294,7 @@ def scan_parquet(
     parallel: ParallelStrategy = "auto",
     use_statistics: bool = True,
     hive_partitioning: bool = True,
+    glob: bool = True,
     hive_schema: SchemaDict | None = None,
     rechunk: bool = False,
     low_memory: bool = False,
@@ -329,6 +329,8 @@ def scan_parquet(
     hive_partitioning
         Infer statistics and schema from hive partitioned URL and use them
         to prune reads.
+    glob
+        Expand path given via globbing rules.
     hive_schema
         The column names and data types of the columns by which the data is partitioned.
         If set to `None` (default), the schema of the Hive partitions is inferred.
@@ -345,8 +347,6 @@ def scan_parquet(
         Cache the result after reading.
     storage_options
         Options that indicate how to connect to a cloud provider.
-        If the cloud provider is not supported by Polars, the storage options
-        are passed to `fsspec.open()`.
 
         The cloud providers currently supported are AWS, GCP, and Azure.
         See supported keys here:
@@ -405,6 +405,7 @@ def scan_parquet(
         hive_partitioning=hive_partitioning,
         hive_schema=hive_schema,
         retries=retries,
+        glob=glob,
     )
 
 
@@ -421,29 +422,15 @@ def _scan_parquet_impl(
     low_memory: bool = False,
     use_statistics: bool = True,
     hive_partitioning: bool = True,
+    glob: bool = True,
     hive_schema: SchemaDict | None = None,
     retries: int = 0,
 ) -> LazyFrame:
     if isinstance(source, list):
         sources = source
         source = None  # type: ignore[assignment]
-        can_use_fsspec = False
     else:
-        can_use_fsspec = True
         sources = []
-
-    # try fsspec scanner
-    if (
-        can_use_fsspec
-        and not is_local_file(source)  # type: ignore[arg-type]
-        and not is_supported_cloud(source)  # type: ignore[arg-type]
-    ):
-        scan = _scan_parquet_fsspec(source, storage_options)  # type: ignore[arg-type]
-        if n_rows:
-            scan = scan.head(n_rows)
-        if row_index_name is not None:
-            scan = scan.with_row_index(row_index_name, row_index_offset)
-        return scan
 
     if storage_options:
         storage_options = list(storage_options.items())  # type: ignore[assignment]
@@ -465,5 +452,6 @@ def _scan_parquet_impl(
         hive_partitioning=hive_partitioning,
         hive_schema=hive_schema,
         retries=retries,
+        glob=glob,
     )
     return wrap_ldf(pylf)

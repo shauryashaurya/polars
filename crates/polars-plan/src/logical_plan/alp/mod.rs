@@ -11,7 +11,7 @@ use polars_utils::unitvec;
 use super::projection_expr::*;
 use crate::prelude::*;
 
-/// [`IR`] is a representation of [`LogicalPlan`] with [`Node`]s which are allocated in an [`Arena`]
+/// [`IR`] is a representation of [`DslPlan`] with [`Node`]s which are allocated in an [`Arena`]
 /// In this IR the logical plan has access to the full dataset.
 #[derive(Clone, Debug, Default)]
 pub enum IR {
@@ -54,7 +54,7 @@ pub enum IR {
         columns: SchemaRef,
         duplicate_check: bool,
     },
-    // Polars' `select` operation. This may access full data.
+    // Polars' `select` operation. This may access full materialized data.
     Select {
         input: Node,
         expr: ProjectionExprs,

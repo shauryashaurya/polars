@@ -290,13 +290,83 @@ impl PyExpr {
     }
 
     #[cfg(feature = "top_k")]
-    fn top_k(&self, k: Self) -> Self {
-        self.inner.clone().top_k(k.inner).into()
+    fn top_k(&self, k: Self, descending: bool, nulls_last: bool, multithreaded: bool) -> Self {
+        self.inner
+            .clone()
+            .top_k(
+                k.inner,
+                SortOptions::default()
+                    .with_order_descending(descending)
+                    .with_nulls_last(nulls_last)
+                    .with_maintain_order(multithreaded),
+            )
+            .into()
     }
 
     #[cfg(feature = "top_k")]
-    fn bottom_k(&self, k: Self) -> Self {
-        self.inner.clone().bottom_k(k.inner).into()
+    fn top_k_by(
+        &self,
+        k: Self,
+        by: Vec<Self>,
+        descending: Vec<bool>,
+        nulls_last: bool,
+        maintain_order: bool,
+        multithreaded: bool,
+    ) -> Self {
+        let by = by.into_iter().map(|e| e.inner).collect::<Vec<_>>();
+        self.inner
+            .clone()
+            .top_k_by(
+                k.inner,
+                by,
+                SortMultipleOptions {
+                    descending,
+                    nulls_last,
+                    multithreaded,
+                    maintain_order,
+                },
+            )
+            .into()
+    }
+
+    #[cfg(feature = "top_k")]
+    fn bottom_k(&self, k: Self, descending: bool, nulls_last: bool, multithreaded: bool) -> Self {
+        self.inner
+            .clone()
+            .bottom_k(
+                k.inner,
+                SortOptions::default()
+                    .with_order_descending(descending)
+                    .with_nulls_last(nulls_last)
+                    .with_maintain_order(multithreaded),
+            )
+            .into()
+    }
+
+    #[cfg(feature = "top_k")]
+    fn bottom_k_by(
+        &self,
+        k: Self,
+        by: Vec<Self>,
+        descending: Vec<bool>,
+        nulls_last: bool,
+        maintain_order: bool,
+        multithreaded: bool,
+    ) -> Self {
+        let by = by.into_iter().map(|e| e.inner).collect::<Vec<_>>();
+        self.inner
+            .clone()
+            .bottom_k_by(
+                k.inner,
+                by,
+                SortMultipleOptions {
+                    descending,
+                    nulls_last,
+                    multithreaded,
+                    maintain_order,
+                },
+            )
+            .into()
     }
 
     #[cfg(feature = "peaks")]
@@ -439,16 +509,17 @@ impl PyExpr {
     fn gather_every(&self, n: usize, offset: usize) -> Self {
         self.inner.clone().gather_every(n, offset).into()
     }
-    fn tail(&self, n: usize) -> Self {
-        self.inner.clone().tail(Some(n)).into()
+
+    fn slice(&self, offset: Self, length: Self) -> Self {
+        self.inner.clone().slice(offset.inner, length.inner).into()
     }
 
     fn head(&self, n: usize) -> Self {
         self.inner.clone().head(Some(n)).into()
     }
 
-    fn slice(&self, offset: Self, length: Self) -> Self {
-        self.inner.clone().slice(offset.inner, length.inner).into()
+    fn tail(&self, n: usize) -> Self {
+        self.inner.clone().tail(Some(n)).into()
     }
 
     fn append(&self, other: Self, upcast: bool) -> Self {
@@ -786,6 +857,14 @@ impl PyExpr {
         };
         self.inner.clone().ewm_mean(options).into()
     }
+    fn ewm_mean_by(&self, times: PyExpr, half_life: &str, check_sorted: bool) -> Self {
+        let half_life = Duration::parse(half_life);
+        self.inner
+            .clone()
+            .ewm_mean_by(times.inner, half_life, check_sorted)
+            .into()
+    }
+
     fn ewm_std(
         &self,
         alpha: f64,

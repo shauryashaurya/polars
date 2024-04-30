@@ -3,7 +3,7 @@ use std::{mem, ptr};
 use ndarray::IntoDimension;
 use numpy::npyffi::types::npy_intp;
 use numpy::npyffi::{self, flags};
-use numpy::{Element, PyArray1, ToNpyDims, PY_ARRAY_API};
+use numpy::{Element, PyArray1, PyArrayDescrMethods, ToNpyDims, PY_ARRAY_API};
 use polars_core::prelude::*;
 use polars_core::utils::arrow::types::NativeType;
 use pyo3::prelude::*;
@@ -20,7 +20,7 @@ use crate::series::PySeries;
 unsafe fn aligned_array<T: Element + NativeType>(
     py: Python<'_>,
     size: usize,
-) -> (&PyArray1<T>, Vec<T>) {
+) -> (Bound<'_, PyArray1<T>>, Vec<T>) {
     let mut buf = vec![T::default(); size];
 
     // modified from
@@ -35,7 +35,7 @@ unsafe fn aligned_array<T: Element + NativeType>(
     let ptr = PY_ARRAY_API.PyArray_NewFromDescr(
         py,
         PY_ARRAY_API.get_type_object(py, npyffi::NpyTypes::PyArray_Type),
-        T::get_dtype(py).into_dtype_ptr(),
+        T::get_dtype_bound(py).into_dtype_ptr(),
         dims.ndim_cint(),
         dims.as_dims_ptr(),
         strides.as_ptr() as *mut _, // strides
@@ -43,13 +43,18 @@ unsafe fn aligned_array<T: Element + NativeType>(
         flags::NPY_ARRAY_OUT_ARRAY, // flag
         ptr::null_mut(),            //obj
     );
-    (PyArray1::from_owned_ptr(py, ptr), buf)
+    (
+        Bound::from_owned_ptr(py, ptr)
+            .downcast_into_exact::<PyArray1<T>>()
+            .unwrap(),
+        buf,
+    )
 }
 
 /// Get reference counter for numpy arrays.
 ///   - For CPython: Get reference counter.
 ///   - For PyPy: Reference counters for a live PyPy object = refcnt + 2 << 60.
-fn get_refcnt<T>(pyarray: &PyArray1<T>) -> isize {
+fn get_refcnt<T>(pyarray: &Bound<'_, PyArray1<T>>) -> isize {
     let refcnt = pyarray.get_refcnt();
     if refcnt >= (2 << 60) {
         refcnt - (2 << 60)
@@ -73,17 +78,17 @@ macro_rules! impl_ufuncs {
                     let (out_array, av) =
                         unsafe { aligned_array::<<$type as PolarsNumericType>::Native>(py, size) };
 
-                    debug_assert_eq!(get_refcnt(out_array), 1);
+                    debug_assert_eq!(get_refcnt(&out_array), 1);
                     // inserting it in a tuple increase the reference count by 1.
-                    let args = PyTuple::new(py, &[out_array]);
-                    debug_assert_eq!(get_refcnt(out_array), 2);
+                    let args = PyTuple::new(py, &[out_array.clone()]);
+                    debug_assert_eq!(get_refcnt(&out_array), 2);
 
                     // whatever the result, we must take the leaked memory ownership back
                     let s = match lambda.call1(args) {
                         Ok(_) => {
                             // if this assert fails, the lambda has taken a reference to the object, so we must panic
                             // args and the lambda return have a reference, making a total of 3
-                            assert_eq!(get_refcnt(out_array), 3);
+                            assert_eq!(get_refcnt(&out_array), 3);
 
                             let validity = self.series.chunks()[0].validity().cloned();
                             let ca =

@@ -1,4 +1,5 @@
 //! DataFrame module.
+#[cfg(feature = "zip_with")]
 use std::borrow::Cow;
 use std::{mem, ops};
 
@@ -1666,7 +1667,7 @@ impl DataFrame {
     /// ```
     /// # use polars_core::prelude::*;
     /// fn example(df: &DataFrame) -> PolarsResult<DataFrame> {
-    ///     let mask = df.column("sepal.width")?.is_not_null();
+    ///     let mask = df.column("sepal_width")?.is_not_null();
     ///     df.filter(&mask)
     /// }
     /// ```
@@ -1884,8 +1885,8 @@ impl DataFrame {
     /// Sort by a single column with default options:
     /// ```
     /// # use polars_core::prelude::*;
-    /// fn sort_by_a(df: &DataFrame) -> PolarsResult<DataFrame> {
-    ///     df.sort(["a"], Default::default())
+    /// fn sort_by_sepal_width(df: &DataFrame) -> PolarsResult<DataFrame> {
+    ///     df.sort(["sepal_width"], Default::default())
     /// }
     /// ```
     /// Sort by a single column with specific order:
@@ -1893,7 +1894,7 @@ impl DataFrame {
     /// # use polars_core::prelude::*;
     /// fn sort_with_specific_order(df: &DataFrame, descending: bool) -> PolarsResult<DataFrame> {
     ///     df.sort(
-    ///         ["a"],
+    ///         ["sepal_width"],
     ///         SortMultipleOptions::new()
     ///             .with_order_descending(descending)
     ///     )
@@ -1904,7 +1905,7 @@ impl DataFrame {
     /// # use polars_core::prelude::*;
     /// fn sort_by_multiple_columns_with_specific_order(df: &DataFrame) -> PolarsResult<DataFrame> {
     ///     df.sort(
-    ///         &["a", "b"],
+    ///         &["sepal_width", "sepal_length"],
     ///         SortMultipleOptions::new()
     ///             .with_order_descendings([false, true])
     ///     )
@@ -2563,7 +2564,12 @@ impl DataFrame {
     pub fn mean_horizontal(&self, null_strategy: NullStrategy) -> PolarsResult<Option<Series>> {
         match self.columns.len() {
             0 => Ok(None),
-            1 => Ok(Some(self.columns[0].clone())),
+            1 => Ok(Some(match self.columns[0].dtype() {
+                dt if dt != &DataType::Float32 && (dt.is_numeric() || dt == &DataType::Boolean) => {
+                    self.columns[0].cast(&DataType::Float64)?
+                },
+                _ => self.columns[0].clone(),
+            })),
             _ => {
                 let columns = self
                     .columns
