@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any, Iterator
 import pytest
 
 import polars as pl
-from polars import ComputeError
+from polars.exceptions import InvalidOperationError
 
 if TYPE_CHECKING:
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +109,7 @@ Series: 'foo' [str]
     "dtype", [pl.String, pl.Categorical, pl.Enum(["abc", "abcd", "abcde"])]
 )
 def test_fmt_series_string_truncate_cat(
-    dtype: pl.PolarsDataType, capfd: pytest.CaptureFixture[str]
+    dtype: PolarsDataType, capfd: pytest.CaptureFixture[str]
 ) -> None:
     s = pl.Series(name="foo", values=["abc", "abcd", "abcde"], dtype=dtype)
     with pl.Config(fmt_str_lengths=4):
@@ -291,7 +291,7 @@ def test_fmt_float_full() -> None:
 def test_fmt_list_12188() -> None:
     # set max_items to 1 < 4(size of failed list) to touch the testing branch.
     with pl.Config(fmt_table_cell_list_len=1), pytest.raises(
-        ComputeError, match="from `i64` to `u8` failed"
+        InvalidOperationError, match="from `i64` to `u8` failed"
     ):
         pl.DataFrame(
             {
@@ -349,7 +349,8 @@ def test_format_numeric_locale_options() -> None:
             "b": [100000.987654321, -234567.89],
             "c": [-11111111, 44444444444],
             "d": [D("12345.6789"), D("-9999999.99")],
-        }
+        },
+        strict=False,
     )
 
     # note: numeric digit grouping looks much better
@@ -404,3 +405,68 @@ def test_format_numeric_locale_options() -> None:
 │ yy  ┆ -234567.89    ┆ 44444444444 ┆ -9999999.9900 │
 └─────┴───────────────┴─────────────┴───────────────┘"""
     )
+
+
+def test_fmt_decimal_max_scale() -> None:
+    values = [D("0.14282911023321884847623576259639164703")]
+    dtype = pl.Decimal(precision=38, scale=38)
+    s = pl.Series(values, dtype=dtype)
+    result = str(s)
+    expected = """shape: (1,)
+Series: '' [decimal[38,38]]
+[
+	0.14282911023321884847623576259639164703
+]"""
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("lf", "expected"),
+    [
+        (
+            (
+                pl.LazyFrame({"a": [1]})
+                .with_columns(b=pl.col("a"))
+                .with_columns(c=pl.col("b"), d=pl.col("a"))
+            ),
+            'simple π 4/4 ["a", "b", "c", "d"]',
+        ),
+        (
+            (
+                pl.LazyFrame({"a_very_very_long_string": [1], "a": [1]})
+                .with_columns(b=pl.col("a"))
+                .with_columns(c=pl.col("b"), d=pl.col("a"))
+            ),
+            'simple π 5/5 ["a_very_very_long_string", "a", ... 3 other columns]',
+        ),
+        (
+            (
+                pl.LazyFrame({"an_even_longer_very_very_long_string": [1], "a": [1]})
+                .with_columns(b=pl.col("a"))
+                .with_columns(c=pl.col("b"), d=pl.col("a"))
+            ),
+            'simple π 5/5 ["an_even_longer_very_very_long_string", ... 4 other columns]',
+        ),
+        (
+            (
+                pl.LazyFrame({"a": [1]})
+                .with_columns(b=pl.col("a"))
+                .with_columns(c=pl.col("b"), a_very_long_string_at_the_end=pl.col("a"))
+            ),
+            'simple π 4/4 ["a", "b", "c", ... 1 other column]',
+        ),
+        (
+            (
+                pl.LazyFrame({"a": [1]})
+                .with_columns(b=pl.col("a"))
+                .with_columns(
+                    a_very_long_string_in_the_middle=pl.col("b"), d=pl.col("a")
+                )
+            ),
+            'simple π 4/4 ["a", "b", ... 2 other columns]',
+        ),
+    ],
+)
+def test_simple_project_format(lf: pl.LazyFrame, expected: str) -> None:
+    result = lf.explain()
+    assert expected in result

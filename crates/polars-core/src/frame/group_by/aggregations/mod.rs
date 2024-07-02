@@ -23,6 +23,7 @@ use polars_utils::idx_vec::IdxVec;
 use polars_utils::ord::{compare_fn_nan_max, compare_fn_nan_min};
 use rayon::prelude::*;
 
+use crate::chunked_array::cast::CastOptions;
 #[cfg(feature = "object")]
 use crate::chunked_array::object::extension::create_extension;
 use crate::frame::group_by::GroupsIdx;
@@ -101,9 +102,6 @@ where
                 unsafe { agg_window.update(start as usize, end as usize) }
             };
 
-            // TODO: Clippy lint is broken, remove attr once fixed.
-            // https://github.com/rust-lang/rust-clippy/issues/12580
-            #[cfg_attr(feature = "nightly", allow(clippy::manual_unwrap_or_default))]
             match agg {
                 Some(val) => val,
                 None => {
@@ -379,7 +377,9 @@ where
         GroupsProxy::Slice { groups, .. } => {
             if _use_rolling_kernels(groups, ca.chunks()) {
                 // this cast is a no-op for floats
-                let s = ca.cast(&K::get_dtype()).unwrap();
+                let s = ca
+                    .cast_with_options(&K::get_dtype(), CastOptions::Overflowing)
+                    .unwrap();
                 let ca: &ChunkedArray<K> = s.as_ref().as_ref();
                 let arr = ca.downcast_iter().next().unwrap();
                 let values = arr.values().as_slice();
@@ -838,7 +838,7 @@ where
         let ca = &self.0.rechunk();
         match groups {
             GroupsProxy::Idx(groups) => {
-                let arr = self.downcast_iter().next().unwrap();
+                let arr = ca.downcast_iter().next().unwrap();
                 let no_nulls = arr.null_count() == 0;
                 agg_helper_idx_on_all::<T, _>(groups, |idx| {
                     debug_assert!(idx.len() <= ca.len());
@@ -855,7 +855,7 @@ where
             },
             GroupsProxy::Slice { groups, .. } => {
                 if _use_rolling_kernels(groups, self.chunks()) {
-                    let arr = self.downcast_iter().next().unwrap();
+                    let arr = ca.downcast_iter().next().unwrap();
                     let values = arr.values().as_slice();
                     let offset_iter = groups.iter().map(|[first, len]| (*first, *len));
                     let arr = match arr.validity() {
@@ -937,6 +937,8 @@ where
     pub(crate) unsafe fn agg_mean(&self, groups: &GroupsProxy) -> Series {
         match groups {
             GroupsProxy::Idx(groups) => {
+                let ca = self.rechunk();
+                let arr = ca.downcast_get(0).unwrap();
                 _agg_helper_idx::<Float64Type, _>(groups, |(first, idx)| {
                     // this can fail due to a bug in lazy code.
                     // here users can create filters in aggregations
@@ -952,7 +954,7 @@ where
                         match (self.has_validity(), self.chunks.len()) {
                             (false, 1) => {
                                 take_agg_no_null_primitive_iter_unchecked::<_, f64, _, _>(
-                                    self.downcast_iter().next().unwrap(),
+                                    arr,
                                     idx2usize(idx),
                                     |a, b| a + b,
                                 )
@@ -966,11 +968,7 @@ where
                                         _,
                                         _,
                                     >(
-                                        self.downcast_iter().next().unwrap(),
-                                        idx2usize(idx),
-                                        |a, b| a + b,
-                                        0.0,
-                                        idx.len() as IdxSize,
+                                        arr, idx2usize(idx), |a, b| a + b, 0.0, idx.len() as IdxSize
                                     )
                                 }
                                 .map(|(sum, null_count)| {
@@ -990,7 +988,9 @@ where
                 ..
             } => {
                 if _use_rolling_kernels(groups_slice, self.chunks()) {
-                    let ca = self.cast(&DataType::Float64).unwrap();
+                    let ca = self
+                        .cast_with_options(&DataType::Float64, CastOptions::Overflowing)
+                        .unwrap();
                     ca.agg_mean(groups)
                 } else {
                     _agg_helper_slice::<Float64Type, _>(groups_slice, |[first, len]| {
@@ -1032,7 +1032,9 @@ where
                 ..
             } => {
                 if _use_rolling_kernels(groups_slice, self.chunks()) {
-                    let ca = self.cast(&DataType::Float64).unwrap();
+                    let ca = self
+                        .cast_with_options(&DataType::Float64, CastOptions::Overflowing)
+                        .unwrap();
                     ca.agg_var(groups, ddof)
                 } else {
                     _agg_helper_slice::<Float64Type, _>(groups_slice, |[first, len]| {
@@ -1080,7 +1082,9 @@ where
                 ..
             } => {
                 if _use_rolling_kernels(groups_slice, self.chunks()) {
-                    let ca = self.cast(&DataType::Float64).unwrap();
+                    let ca = self
+                        .cast_with_options(&DataType::Float64, CastOptions::Overflowing)
+                        .unwrap();
                     ca.agg_std(groups, ddof)
                 } else {
                     _agg_helper_slice::<Float64Type, _>(groups_slice, |[first, len]| {

@@ -4,12 +4,14 @@ use std::sync::Mutex;
 use arrow::datatypes::PhysicalType;
 use polars_core::prelude::*;
 use polars_parquet::write::{
-    to_parquet_schema, transverse, CompressionOptions, Encoding, FileWriter, Version, WriteOptions,
+    to_parquet_schema, transverse, CompressionOptions, Encoding, FileWriter, StatisticsOptions,
+    Version, WriteOptions,
 };
 
 use super::batched_writer::BatchedWriter;
 use super::options::ParquetCompression;
 use crate::prelude::chunk_df_for_writing;
+use crate::shared::schema_to_arrow_checked;
 
 /// Write a DataFrame to Parquet format.
 #[must_use]
@@ -18,7 +20,7 @@ pub struct ParquetWriter<W> {
     /// Data page compression
     compression: CompressionOptions,
     /// Compute and write column statistics.
-    statistics: bool,
+    statistics: StatisticsOptions,
     /// if `None` will be 512^2 rows
     row_group_size: Option<usize>,
     /// if `None` will be 1024^2 bytes
@@ -39,7 +41,7 @@ where
         ParquetWriter {
             writer,
             compression: ParquetCompression::default().into(),
-            statistics: true,
+            statistics: StatisticsOptions::default(),
             row_group_size: None,
             data_page_size: None,
             parallel: true,
@@ -56,7 +58,7 @@ where
     }
 
     /// Compute and write statistic
-    pub fn with_statistics(mut self, statistics: bool) -> Self {
+    pub fn with_statistics(mut self, statistics: StatisticsOptions) -> Self {
         self.statistics = statistics;
         self
     }
@@ -81,9 +83,7 @@ where
     }
 
     pub fn batched(self, schema: &Schema) -> PolarsResult<BatchedWriter<W>> {
-        let fields = schema.to_arrow(true).fields;
-        let schema = ArrowSchema::from(fields);
-
+        let schema = schema_to_arrow_checked(schema, true, "parquet")?;
         let parquet_schema = to_parquet_schema(&schema)?;
         let encodings = get_encodings(&schema);
         let options = self.materialize_options();
@@ -100,9 +100,9 @@ where
 
     fn materialize_options(&self) -> WriteOptions {
         WriteOptions {
-            write_statistics: self.statistics,
+            statistics: self.statistics,
             compression: self.compression,
-            version: Version::V2,
+            version: Version::V1,
             data_pagesize_limit: self.data_page_size,
         }
     }

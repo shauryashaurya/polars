@@ -11,6 +11,39 @@ use regex::{Regex, RegexBuilder};
 
 use crate::mmap::{MmapBytesReader, ReaderBytes};
 
+pub static POLARS_TEMP_DIR_BASE_PATH: Lazy<Box<Path>> = Lazy::new(|| {
+    let path = std::env::var("POLARS_TEMP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::temp_dir().to_string_lossy().as_ref()).join("polars/")
+        })
+        .into_boxed_path();
+
+    if let Err(err) = std::fs::create_dir_all(path.as_ref()) {
+        if !path.is_dir() {
+            panic!(
+                "failed to create temporary directory: path = {}, err = {}",
+                path.to_str().unwrap(),
+                err
+            );
+        }
+    }
+
+    path
+});
+
+/// Ignores errors from `std::fs::create_dir_all` if the directory exists.
+#[cfg(feature = "file_cache")]
+pub(crate) fn ensure_directory_init(path: &Path) -> std::io::Result<()> {
+    let result = std::fs::create_dir_all(path);
+
+    if path.is_dir() {
+        Ok(())
+    } else {
+        result
+    }
+}
+
 pub fn get_reader_bytes<'a, R: Read + MmapBytesReader + ?Sized>(
     reader: &'a mut R,
 ) -> PolarsResult<ReaderBytes<'a>> {
@@ -133,6 +166,26 @@ pub(crate) fn update_row_counts2(dfs: &mut [DataFrame], offset: IdxSize) {
     }
 }
 
+/// Because of threading every row starts from `0` or from `offset`.
+/// We must correct that so that they are monotonically increasing.
+#[cfg(feature = "json")]
+pub(crate) fn update_row_counts3(dfs: &mut [DataFrame], heights: &[IdxSize], offset: IdxSize) {
+    assert_eq!(dfs.len(), heights.len());
+    if !dfs.is_empty() {
+        let mut previous = heights[0] + offset;
+        for i in 1..dfs.len() {
+            let df = &mut dfs[i];
+            let n_read = heights[i];
+
+            if let Some(s) = unsafe { df.get_columns_mut() }.get_mut(0) {
+                *s = &*s + previous;
+            }
+
+            previous += n_read;
+        }
+    }
+}
+
 /// Compute `remaining_rows_to_read` to be taken per file up front, so we can actually read
 /// concurrently/parallel
 ///
@@ -217,53 +270,6 @@ pub fn materialize_projection(
     }
 }
 
-pub fn check_projected_schema_impl(
-    a: &Schema,
-    b: &Schema,
-    projected_names: Option<&[String]>,
-    msg: &str,
-) -> PolarsResult<()> {
-    if !projected_names
-        .map(|projected_names| {
-            projected_names
-                .iter()
-                .all(|name| a.get(name) == b.get(name))
-        })
-        .unwrap_or_else(|| a == b)
-    {
-        polars_bail!(ComputeError: "{msg}\n\n\
-                    Expected: {:?}\n\n\
-                    Got: {:?}", a, b)
-    }
-    Ok(())
-}
-
-/// Checks if the projected columns are equal
-pub fn check_projected_arrow_schema(
-    a: &ArrowSchema,
-    b: &ArrowSchema,
-    projected_names: Option<&[String]>,
-    msg: &str,
-) -> PolarsResult<()> {
-    if a != b {
-        let a = Schema::from(a);
-        let b = Schema::from(b);
-        check_projected_schema_impl(&a, &b, projected_names, msg)
-    } else {
-        Ok(())
-    }
-}
-
-/// Checks if the projected columns are equal
-pub fn check_projected_schema(
-    a: &Schema,
-    b: &Schema,
-    projected_names: Option<&[String]>,
-    msg: &str,
-) -> PolarsResult<()> {
-    check_projected_schema_impl(a, b, projected_names, msg)
-}
-
 /// Split DataFrame into chunks in preparation for writing. The chunks have a
 /// maximum number of rows per chunk to ensure reasonable memory efficiency when
 /// reading the resulting file, and a minimum size per chunk to ensure
@@ -276,22 +282,56 @@ pub(crate) fn chunk_df_for_writing(
     // ensures all chunks are aligned.
     df.align_chunks();
 
+    // Accumulate many small chunks to the row group size.
+    // See: #16403
+    if !df.get_columns().is_empty()
+        && df.get_columns()[0]
+            .chunk_lengths()
+            .take(5)
+            .all(|len| len < row_group_size)
+    {
+        fn finish(scratch: &mut Vec<DataFrame>, new_chunks: &mut Vec<DataFrame>) {
+            let mut new = accumulate_dataframes_vertical_unchecked(scratch.drain(..));
+            new.as_single_chunk_par();
+            new_chunks.push(new);
+        }
+
+        let mut new_chunks = Vec::with_capacity(df.n_chunks()); // upper limit;
+        let mut scratch = vec![];
+        let mut remaining = row_group_size;
+
+        for df in df.split_chunks() {
+            remaining = remaining.saturating_sub(df.height());
+            scratch.push(df);
+
+            if remaining == 0 {
+                remaining = row_group_size;
+                finish(&mut scratch, &mut new_chunks);
+            }
+        }
+        if !scratch.is_empty() {
+            finish(&mut scratch, &mut new_chunks);
+        }
+        return Ok(Cow::Owned(accumulate_dataframes_vertical_unchecked(
+            new_chunks,
+        )));
+    }
+
     let n_splits = df.height() / row_group_size;
     let result = if n_splits > 0 {
-        Cow::Owned(accumulate_dataframes_vertical_unchecked(
-            split_df_as_ref(df, n_splits, false)?
-                .into_iter()
-                .map(|mut df| {
-                    // If the chunks are small enough, writing many small chunks
-                    // leads to slow writing performance, so in that case we
-                    // merge them.
-                    let n_chunks = df.n_chunks();
-                    if n_chunks > 1 && (df.estimated_size() / n_chunks < 128 * 1024) {
-                        df.as_single_chunk_par();
-                    }
-                    df
-                }),
-        ))
+        let mut splits = split_df_as_ref(df, n_splits, false);
+
+        for df in splits.iter_mut() {
+            // If the chunks are small enough, writing many small chunks
+            // leads to slow writing performance, so in that case we
+            // merge them.
+            let n_chunks = df.n_chunks();
+            if n_chunks > 1 && (df.estimated_size() / n_chunks < 128 * 1024) {
+                df.as_single_chunk_par();
+            }
+        }
+
+        Cow::Owned(accumulate_dataframes_vertical_unchecked(splits))
     } else {
         Cow::Borrowed(df)
     };

@@ -1,27 +1,20 @@
 from __future__ import annotations
 
 import datetime as dt
-from datetime import timedelta
 from typing import TYPE_CHECKING, Iterable
 
 import polars._reexport as pl
 from polars import functions as F
 from polars._utils.convert import parse_as_duration_string
-from polars._utils.deprecation import (
-    deprecate_function,
-    deprecate_renamed_function,
-    deprecate_saturating,
-    issue_deprecation_warning,
-    rename_use_earliest_to_ambiguous,
-)
-from polars._utils.parse_expr_input import parse_as_expression
+from polars._utils.deprecation import deprecate_function
+from polars._utils.parse import parse_into_expression
 from polars._utils.unstable import unstable
 from polars._utils.wrap import wrap_expr
 from polars.datatypes import DTYPE_TEMPORAL_UNITS, Date, Int32
 
 if TYPE_CHECKING:
     from polars import Expr
-    from polars.type_aliases import (
+    from polars._typing import (
         Ambiguous,
         EpochTimeUnit,
         IntoExpr,
@@ -146,7 +139,7 @@ class ExprDateTimeNameSpace:
         │ 2020-01-06 ┆ 2020-01-06      │
         └────────────┴─────────────────┘
         """
-        n_pyexpr = parse_as_expression(n)
+        n_pyexpr = parse_into_expression(n)
         unix_epoch = dt.date(1970, 1, 1)
         return wrap_expr(
             self._pyexpr.dt_add_business_days(
@@ -157,14 +150,7 @@ class ExprDateTimeNameSpace:
             )
         )
 
-    def truncate(
-        self,
-        every: str | timedelta | Expr,
-        offset: str | timedelta | None = None,
-        *,
-        use_earliest: bool | None = None,
-        ambiguous: Ambiguous | Expr | None = None,
-    ) -> Expr:
+    def truncate(self, every: str | dt.timedelta | Expr) -> Expr:
         """
         Divide the date/datetime range into buckets.
 
@@ -179,34 +165,10 @@ class ExprDateTimeNameSpace:
         ----------
         every
             Every interval start and period length
-        offset
-            Offset the window
-
-            .. deprecated:: 0.20.19
-                This argument is deprecated and will be removed in the next breaking
-                release. Instead, chain `dt.truncate` with `dt.offset_by`.
-        use_earliest
-            Determine how to deal with ambiguous datetimes:
-
-            - `None` (default): raise
-            - `True`: use the earliest datetime
-            - `False`: use the latest datetime
-
-            .. deprecated:: 0.19.0
-                This is now automatically inferred; you can safely omit this argument.
-        ambiguous
-            Determine how to deal with ambiguous datetimes:
-
-            - `'raise'` (default): raise
-            - `'earliest'`: use the earliest datetime
-            - `'latest'`: use the latest datetime
-
-            .. deprecated:: 0.19.3
-                This is now automatically inferred; you can safely omit this argument.
 
         Notes
         -----
-        The `every` and `offset` argument are created with the
+        The `every` argument is created with the
         the following string language:
 
         - 1ns   (1 nanosecond)
@@ -308,47 +270,14 @@ class ExprDateTimeNameSpace:
         │ 2001-01-01 01:00:00 ┆ 2001-01-01 01:00:00 │
         └─────────────────────┴─────────────────────┘
         """
-        every = deprecate_saturating(every)
-        offset = deprecate_saturating(offset)
-        if offset is not None:
-            issue_deprecation_warning(
-                "`offset` is deprecated and will be removed in the next breaking release. "
-                "Instead, chain `dt.truncate` with `dt.offset_by`.",
-                version="0.20.19",
-            )
         if not isinstance(every, pl.Expr):
             every = parse_as_duration_string(every)
 
-        if use_earliest is not None:
-            issue_deprecation_warning(
-                "`use_earliest` is deprecated. It is now automatically inferred; you can safely omit this argument.",
-                version="0.19.13",
-            )
-        if ambiguous is not None:
-            issue_deprecation_warning(
-                "`ambiguous` is deprecated. It is now automatically inferred; you can safely omit this argument.",
-                version="0.19.13",
-            )
-        every = parse_as_expression(every, str_as_lit=True)
-
-        if offset is None:
-            offset = "0ns"
-
-        return wrap_expr(
-            self._pyexpr.dt_truncate(
-                every,
-                parse_as_duration_string(offset),
-            )
-        )
+        every = parse_into_expression(every, str_as_lit=True)
+        return wrap_expr(self._pyexpr.dt_truncate(every))
 
     @unstable()
-    def round(
-        self,
-        every: str | timedelta | IntoExprColumn,
-        offset: str | timedelta | None = None,
-        *,
-        ambiguous: Ambiguous | Expr | None = None,
-    ) -> Expr:
+    def round(self, every: str | dt.timedelta | IntoExprColumn) -> Expr:
         """
         Divide the date/datetime range into buckets.
 
@@ -369,21 +298,6 @@ class ExprDateTimeNameSpace:
         ----------
         every
             Every interval start and period length
-        offset
-            Offset the window
-
-            .. deprecated:: 0.20.19
-                This argument is deprecated and will be removed in the next breaking
-                release. Instead, chain `dt.round` with `dt.offset_by`.
-        ambiguous
-            Determine how to deal with ambiguous datetimes:
-
-            - `'raise'` (default): raise
-            - `'earliest'`: use the earliest datetime
-            - `'latest'`: use the latest datetime
-
-            .. deprecated:: 0.19.3
-                This is now automatically inferred; you can safely omit this argument.
 
         Returns
         -------
@@ -392,7 +306,7 @@ class ExprDateTimeNameSpace:
 
         Notes
         -----
-        The `every` and `offset` argument are created with the
+        The `every` argument is created with the
         the following small string formatting language:
 
         - 1ns   (1 nanosecond)
@@ -465,31 +379,10 @@ class ExprDateTimeNameSpace:
         │ 2001-01-01 01:00:00 ┆ 2001-01-01 01:00:00 │
         └─────────────────────┴─────────────────────┘
         """
-        every = deprecate_saturating(every)
-        offset = deprecate_saturating(offset)
-        if offset is not None:
-            issue_deprecation_warning(
-                "`offset` is deprecated and will be removed in the next breaking release. "
-                "Instead, chain `dt.round` with `dt.offset_by`.",
-                version="0.20.19",
-            )
-        if offset is None:
-            offset = "0ns"
-
-        if ambiguous is not None:
-            issue_deprecation_warning(
-                "`ambiguous` is deprecated. It is now automatically inferred; you can safely omit this argument.",
-                version="0.19.13",
-            )
-        if isinstance(every, timedelta):
+        if isinstance(every, dt.timedelta):
             every = parse_as_duration_string(every)
-        every = parse_as_expression(every, str_as_lit=True)
-        return wrap_expr(
-            self._pyexpr.dt_round(
-                every,
-                parse_as_duration_string(offset),
-            )
-        )
+        every = parse_into_expression(every, str_as_lit=True)
+        return wrap_expr(self._pyexpr.dt_round(every))
 
     def combine(self, time: dt.time | Expr, time_unit: TimeUnit = "us") -> Expr:
         """
@@ -548,7 +441,7 @@ class ExprDateTimeNameSpace:
         if not isinstance(time, (dt.time, pl.Expr)):
             msg = f"expected 'time' to be a Python time or Polars expression, found {type(time).__name__!r}"
             raise TypeError(msg)
-        time = parse_as_expression(time)
+        time = parse_into_expression(time)
         return wrap_expr(self._pyexpr.dt_combine(time, time_unit))
 
     def to_string(self, format: str) -> Expr:
@@ -1738,7 +1631,6 @@ class ExprDateTimeNameSpace:
         self,
         time_zone: str | None,
         *,
-        use_earliest: bool | None = None,
         ambiguous: Ambiguous | Expr = "raise",
         non_existent: NonExistent = "raise",
     ) -> Expr:
@@ -1752,15 +1644,6 @@ class ExprDateTimeNameSpace:
         ----------
         time_zone
             Time zone for the `Datetime` expression. Pass `None` to unset time zone.
-        use_earliest
-            Determine how to deal with ambiguous datetimes:
-
-            - `None` (default): raise
-            - `True`: use the earliest datetime
-            - `False`: use the latest datetime
-
-            .. deprecated:: 0.19.0
-                Use `ambiguous` instead
         ambiguous
             Determine how to deal with ambiguous datetimes:
 
@@ -1840,7 +1723,6 @@ class ExprDateTimeNameSpace:
         │ 2018-10-28 02:00:00 ┆ latest    ┆ 2018-10-28 02:00:00 CET       │
         └─────────────────────┴───────────┴───────────────────────────────┘
         """
-        ambiguous = rename_use_earliest_to_ambiguous(use_earliest, ambiguous)
         if not isinstance(ambiguous, pl.Expr):
             ambiguous = F.lit(ambiguous)
         return wrap_expr(
@@ -2214,13 +2096,14 @@ class ExprDateTimeNameSpace:
         │ 2005-01-01 00:00:00 ┆ 1y     ┆ 2006-01-01 00:00:00 │
         └─────────────────────┴────────┴─────────────────────┘
         """
-        by = deprecate_saturating(by)
-        by = parse_as_expression(by, str_as_lit=True)
+        by = parse_into_expression(by, str_as_lit=True)
         return wrap_expr(self._pyexpr.dt_offset_by(by))
 
     def month_start(self) -> Expr:
         """
         Roll backward to the first day of the month.
+
+        For datetimes, the time-of-day is preserved.
 
         Returns
         -------
@@ -2270,6 +2153,8 @@ class ExprDateTimeNameSpace:
     def month_end(self) -> Expr:
         """
         Roll forward to the last day of the month.
+
+        For datetimes, the time-of-day is preserved.
 
         Returns
         -------
@@ -2389,73 +2274,3 @@ class ExprDateTimeNameSpace:
         └─────────────────────────────┴──────────────┘
         """
         return wrap_expr(self._pyexpr.dt_dst_offset())
-
-    @deprecate_renamed_function("total_days", version="0.19.13")
-    def days(self) -> Expr:
-        """
-        Extract the total days from a Duration type.
-
-        .. deprecated:: 0.19.13
-            Use :meth:`total_days` instead.
-        """
-        return self.total_days()
-
-    @deprecate_renamed_function("total_hours", version="0.19.13")
-    def hours(self) -> Expr:
-        """
-        Extract the total hours from a Duration type.
-
-        .. deprecated:: 0.19.13
-            Use :meth:`total_hours` instead.
-        """
-        return self.total_hours()
-
-    @deprecate_renamed_function("total_minutes", version="0.19.13")
-    def minutes(self) -> Expr:
-        """
-        Extract the total minutes from a Duration type.
-
-        .. deprecated:: 0.19.13
-            Use :meth:`total_minutes` instead.
-        """
-        return self.total_minutes()
-
-    @deprecate_renamed_function("total_seconds", version="0.19.13")
-    def seconds(self) -> Expr:
-        """
-        Extract the total seconds from a Duration type.
-
-        .. deprecated:: 0.19.13
-            Use :meth:`total_seconds` instead.
-        """
-        return self.total_seconds()
-
-    @deprecate_renamed_function("total_milliseconds", version="0.19.13")
-    def milliseconds(self) -> Expr:
-        """
-        Extract the total milliseconds from a Duration type.
-
-        .. deprecated:: 0.19.13
-            Use :meth:`total_milliseconds` instead.
-        """
-        return self.total_milliseconds()
-
-    @deprecate_renamed_function("total_microseconds", version="0.19.13")
-    def microseconds(self) -> Expr:
-        """
-        Extract the total microseconds from a Duration type.
-
-        .. deprecated:: 0.19.13
-            Use :meth:`total_microseconds` instead.
-        """
-        return self.total_microseconds()
-
-    @deprecate_renamed_function("total_nanoseconds", version="0.19.13")
-    def nanoseconds(self) -> Expr:
-        """
-        Extract the total nanoseconds from a Duration type.
-
-        .. deprecated:: 0.19.13
-            Use :meth:`total_nanoseconds` instead.
-        """
-        return self.total_nanoseconds()

@@ -46,18 +46,18 @@ fn test_lazy_alias() {
 }
 
 #[test]
-fn test_lazy_melt() {
+fn test_lazy_unpivot() {
     let df = get_df();
 
-    let args = MeltArgs {
-        id_vars: vec!["petal_width".into(), "petal_length".into()],
-        value_vars: vec!["sepal_length".into(), "sepal_width".into()],
+    let args = UnpivotArgs {
+        on: vec!["sepal_length".into(), "sepal_width".into()],
+        index: vec!["petal_width".into(), "petal_length".into()],
         ..Default::default()
     };
 
     let out = df
         .lazy()
-        .melt(args)
+        .unpivot(args)
         .filter(col("variable").eq(lit("sepal_length")))
         .select([col("variable"), col("petal_width"), col("value")])
         .collect()
@@ -256,7 +256,7 @@ fn test_lazy_query_3() {
 }
 
 #[test]
-fn test_lazy_query_4() {
+fn test_lazy_query_4() -> PolarsResult<()> {
     let df = df! {
         "uid" => [0, 0, 0, 1, 1, 1],
         "day" => [1, 2, 3, 1, 2, 3],
@@ -273,7 +273,7 @@ fn test_lazy_query_4() {
             col("day").alias("day"),
             col("cumcases")
                 .apply(
-                    |s: Series| Ok(Some(&s - &(s.shift(1)))),
+                    |s: Series| (&s - &(s.shift(1))).map(Some),
                     GetOutput::same_type(),
                 )
                 .alias("diff_cases"),
@@ -291,6 +291,8 @@ fn test_lazy_query_4() {
         Vec::from(out.column("diff_cases").unwrap().i32().unwrap()),
         &[None, Some(2), Some(3), None, Some(5), Some(11)]
     );
+
+    Ok(())
 }
 
 #[test]
@@ -1036,7 +1038,7 @@ fn test_arg_sort_multiple() -> PolarsResult<()> {
         .lazy()
         .select([arg_sort_by(
             [col("int"), col("flt")],
-            SortMultipleOptions::default().with_order_descendings([true, false]),
+            SortMultipleOptions::default().with_order_descending_multi([true, false]),
         )])
         .collect()?;
 
@@ -1054,7 +1056,7 @@ fn test_arg_sort_multiple() -> PolarsResult<()> {
         .lazy()
         .select([arg_sort_by(
             [col("str"), col("flt")],
-            SortMultipleOptions::default().with_order_descendings([true, false]),
+            SortMultipleOptions::default().with_order_descending_multi([true, false]),
         )])
         .collect()?;
     Ok(())
@@ -1143,9 +1145,11 @@ fn test_fill_forward() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .select([col("b")
-            .forward_fill(None)
-            .over_with_options([col("a")], WindowMapping::Join)])
+        .select([col("b").forward_fill(None).over_with_options(
+            [col("a")],
+            None,
+            WindowMapping::Join,
+        )])
         .collect()?;
     let agg = out.column("b")?.list()?;
 
@@ -1171,7 +1175,7 @@ fn test_cross_join() -> PolarsResult<()> {
         "b" => [None, Some(12)]
     ]?;
 
-    let out = df1.lazy().cross_join(df2.lazy()).collect()?;
+    let out = df1.lazy().cross_join(df2.lazy(), None).collect()?;
     assert_eq!(out.shape(), (6, 4));
     Ok(())
 }
@@ -1305,7 +1309,7 @@ fn test_filter_after_shift_in_groups() -> PolarsResult<()> {
             col("B")
                 .shift(lit(1))
                 .filter(col("B").shift(lit(1)).gt(lit(4)))
-                .over_with_options([col("fruits")], WindowMapping::Join)
+                .over_with_options([col("fruits")], None, WindowMapping::Join)
                 .alias("filtered"),
         ])
         .collect()?;
@@ -1664,7 +1668,7 @@ fn test_single_ranked_group() -> PolarsResult<()> {
                 },
                 None,
             )
-            .over_with_options([col("group")], WindowMapping::Join)])
+            .over_with_options([col("group")], None, WindowMapping::Join)])
         .collect()?;
 
     let out = out.column("value")?.explode()?;

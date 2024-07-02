@@ -15,10 +15,10 @@ impl private::PrivateSeries for SeriesWrap<BinaryOffsetChunked> {
     fn _dtype(&self) -> &DataType {
         self.0.ref_field().data_type()
     }
-    fn _get_flags(&self) -> Settings {
+    fn _get_flags(&self) -> MetadataFlags {
         self.0.get_flags()
     }
-    fn _set_flags(&mut self, flags: Settings) {
+    fn _set_flags(&mut self, flags: MetadataFlags) {
         self.0.set_flags(flags)
     }
 
@@ -62,8 +62,8 @@ impl SeriesTrait for SeriesWrap<BinaryOffsetChunked> {
         self.0.rename(name);
     }
 
-    fn chunk_lengths(&self) -> ChunkIdIter {
-        self.0.chunk_id()
+    fn chunk_lengths(&self) -> ChunkLenIter {
+        self.0.chunk_lengths()
     }
     fn name(&self) -> &str {
         self.0.name()
@@ -81,6 +81,10 @@ impl SeriesTrait for SeriesWrap<BinaryOffsetChunked> {
 
     fn slice(&self, offset: i64, length: usize) -> Series {
         self.0.slice(offset, length).into_series()
+    }
+    fn split_at(&self, offset: i64) -> (Series, Series) {
+        let (a, b) = self.0.split_at(offset);
+        (a.into_series(), b.into_series())
     }
 
     fn append(&mut self, other: &Series) -> PolarsResult<()> {
@@ -134,8 +138,8 @@ impl SeriesTrait for SeriesWrap<BinaryOffsetChunked> {
         ChunkExpandAtIndex::new_from_index(&self.0, index, length).into_series()
     }
 
-    fn cast(&self, data_type: &DataType) -> PolarsResult<Series> {
-        self.0.cast(data_type)
+    fn cast(&self, data_type: &DataType, options: CastOptions) -> PolarsResult<Series> {
+        self.0.cast_with_options(data_type, options)
     }
 
     fn get(&self, index: usize) -> PolarsResult<AnyValue> {

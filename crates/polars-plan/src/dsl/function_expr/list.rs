@@ -326,17 +326,14 @@ pub(super) fn slice(args: &mut [Series]) -> PolarsResult<Option<Series>> {
             let length_ca = length_s.cast(&DataType::Int64)?;
             let length_ca = length_ca.i64().unwrap();
 
-            // SAFETY: unstable series never lives longer than the iterator.
-            unsafe {
-                list_ca
-                    .amortized_iter()
-                    .zip(length_ca)
-                    .map(|(opt_s, opt_length)| match (opt_s, opt_length) {
-                        (Some(s), Some(length)) => Some(s.as_ref().slice(offset, length as usize)),
-                        _ => None,
-                    })
-                    .collect_trusted()
-            }
+            list_ca
+                .amortized_iter()
+                .zip(length_ca)
+                .map(|(opt_s, opt_length)| match (opt_s, opt_length) {
+                    (Some(s), Some(length)) => Some(s.as_ref().slice(offset, length as usize)),
+                    _ => None,
+                })
+                .collect_trusted()
         },
         (offset_len, 1) => {
             check_slice_arg_shape(offset_len, list_ca.len(), "offset")?;
@@ -347,17 +344,14 @@ pub(super) fn slice(args: &mut [Series]) -> PolarsResult<Option<Series>> {
                 .unwrap_or(usize::MAX);
             let offset_ca = offset_s.cast(&DataType::Int64)?;
             let offset_ca = offset_ca.i64().unwrap();
-            // SAFETY: unstable series never lives longer than the iterator.
-            unsafe {
-                list_ca
-                    .amortized_iter()
-                    .zip(offset_ca)
-                    .map(|(opt_s, opt_offset)| match (opt_s, opt_offset) {
-                        (Some(s), Some(offset)) => Some(s.as_ref().slice(offset, length_slice)),
-                        _ => None,
-                    })
-                    .collect_trusted()
-            }
+            list_ca
+                .amortized_iter()
+                .zip(offset_ca)
+                .map(|(opt_s, opt_offset)| match (opt_s, opt_offset) {
+                    (Some(s), Some(offset)) => Some(s.as_ref().slice(offset, length_slice)),
+                    _ => None,
+                })
+                .collect_trusted()
         },
         _ => {
             check_slice_arg_shape(offset_s.len(), list_ca.len(), "offset")?;
@@ -369,22 +363,19 @@ pub(super) fn slice(args: &mut [Series]) -> PolarsResult<Option<Series>> {
             let length_ca = length_s.cast(&DataType::Int64)?;
             let length_ca = length_ca.i64().unwrap();
 
-            // SAFETY: unstable series never lives longer than the iterator.
-            unsafe {
-                list_ca
-                    .amortized_iter()
-                    .zip(offset_ca)
-                    .zip(length_ca)
-                    .map(|((opt_s, opt_offset), opt_length)| {
-                        match (opt_s, opt_offset, opt_length) {
-                            (Some(s), Some(offset), Some(length)) => {
-                                Some(s.as_ref().slice(offset, length as usize))
-                            },
-                            _ => None,
-                        }
-                    })
-                    .collect_trusted()
-            }
+            list_ca
+                .amortized_iter()
+                .zip(offset_ca)
+                .zip(length_ca)
+                .map(
+                    |((opt_s, opt_offset), opt_length)| match (opt_s, opt_offset, opt_length) {
+                        (Some(s), Some(offset), Some(length)) => {
+                            Some(s.as_ref().slice(offset, length as usize))
+                        },
+                        _ => None,
+                    },
+                )
+                .collect_trusted()
         },
     };
     out.rename(s.name());
@@ -398,7 +389,7 @@ pub(super) fn concat(s: &mut [Series]) -> PolarsResult<Option<Series>> {
     let mut first_ca = match first.list().ok() {
         Some(ca) => ca,
         None => {
-            first = first.reshape(&[-1, 1]).unwrap();
+            first = first.reshape_list(&[-1, 1]).unwrap();
             first.list().unwrap()
         },
     }
@@ -428,7 +419,7 @@ pub(super) fn get(s: &mut [Series], null_on_oob: bool) -> PolarsResult<Option<Se
                 Ok(Some(Series::full_null(
                     ca.name(),
                     ca.len(),
-                    &ca.inner_dtype(),
+                    ca.inner_dtype(),
                 )))
             }
         },
@@ -436,31 +427,57 @@ pub(super) fn get(s: &mut [Series], null_on_oob: bool) -> PolarsResult<Option<Se
             let ca = ca.rechunk();
             let arr = ca.downcast_iter().next().unwrap();
             let offsets = arr.offsets().as_slice();
-
-            let take_by = index
-                .into_iter()
-                .enumerate()
-                .map(|(i, opt_idx)| match opt_idx {
-                    Some(idx) => {
-                        let (start, end) =
-                            unsafe { (*offsets.get_unchecked(i), *offsets.get_unchecked(i + 1)) };
-                        let offset = if idx >= 0 { start + idx } else { end + idx };
-                        if offset >= end || offset < start || start == end {
-                            if null_on_oob {
-                                Ok(None)
+            let take_by = if ca.null_count() == 0 {
+                index
+                    .iter()
+                    .enumerate()
+                    .map(|(i, opt_idx)| match opt_idx {
+                        Some(idx) => {
+                            let (start, end) = unsafe {
+                                (*offsets.get_unchecked(i), *offsets.get_unchecked(i + 1))
+                            };
+                            let offset = if idx >= 0 { start + idx } else { end + idx };
+                            if offset >= end || offset < start || start == end {
+                                if null_on_oob {
+                                    Ok(None)
+                                } else {
+                                    polars_bail!(ComputeError: "get index is out of bounds");
+                                }
                             } else {
-                                polars_bail!(ComputeError: "get index is out of bounds");
+                                Ok(Some(offset as IdxSize))
                             }
-                        } else {
-                            Ok(Some(offset as IdxSize))
-                        }
-                    },
-                    None => Ok(None),
-                })
-                .collect::<Result<IdxCa, _>>()?;
+                        },
+                        None => Ok(None),
+                    })
+                    .collect::<Result<IdxCa, _>>()?
+            } else {
+                index
+                    .iter()
+                    .zip(arr.validity().unwrap())
+                    .enumerate()
+                    .map(|(i, (opt_idx, valid))| match (valid, opt_idx) {
+                        (true, Some(idx)) => {
+                            let (start, end) = unsafe {
+                                (*offsets.get_unchecked(i), *offsets.get_unchecked(i + 1))
+                            };
+                            let offset = if idx >= 0 { start + idx } else { end + idx };
+                            if offset >= end || offset < start || start == end {
+                                if null_on_oob {
+                                    Ok(None)
+                                } else {
+                                    polars_bail!(ComputeError: "get index is out of bounds");
+                                }
+                            } else {
+                                Ok(Some(offset as IdxSize))
+                            }
+                        },
+                        _ => Ok(None),
+                    })
+                    .collect::<Result<IdxCa, _>>()?
+            };
             let s = Series::try_from((ca.name(), arr.values().clone())).unwrap();
             unsafe { s.take_unchecked(&take_by) }
-                .cast(&ca.inner_dtype())
+                .cast(ca.inner_dtype())
                 .map(Some)
         },
         len => polars_bail!(
@@ -482,7 +499,7 @@ pub(super) fn gather(args: &[Series], null_on_oob: bool) -> PolarsResult<Series>
         let idx = idx.get(0)?.try_extract::<i64>()?;
         let out = ca.lst_get(idx, null_on_oob)?;
         // make sure we return a list
-        out.reshape(&[-1, 1])
+        out.reshape_list(&[-1, 1])
     } else {
         ca.lst_gather(idx, null_on_oob)
     }

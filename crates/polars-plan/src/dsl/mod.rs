@@ -3,12 +3,12 @@
 #[cfg(feature = "dtype-categorical")]
 pub mod cat;
 
-#[cfg(feature = "rolling_window")]
+#[cfg(any(feature = "rolling_window", feature = "rolling_window_by"))]
 use std::any::Any;
 
 #[cfg(feature = "dtype-categorical")]
 pub use cat::*;
-#[cfg(feature = "rolling_window")]
+#[cfg(feature = "rolling_window_by")]
 pub(crate) use polars_time::prelude::*;
 
 mod arithmetic;
@@ -56,6 +56,8 @@ pub use list::*;
 pub use meta::*;
 pub use name::*;
 pub use options::*;
+use polars_core::chunked_array::cast::CastOptions;
+use polars_core::error::feature_gated;
 use polars_core::prelude::*;
 #[cfg(feature = "diff")]
 use polars_core::series::ops::NullBehavior;
@@ -67,7 +69,7 @@ pub use struct_::*;
 pub use udf::UserDefinedFunction;
 
 use crate::constants::MAP_LIST_NAME;
-pub use crate::logical_plan::lit;
+pub use crate::plans::lit;
 use crate::prelude::*;
 
 impl Expr {
@@ -366,7 +368,7 @@ impl Expr {
                 collect_groups: ApplyOptions::GroupWise,
                 returns_scalar: true,
                 fmt_str: "search_sorted",
-                cast_to_supertypes: true,
+                cast_to_supertypes: Some(Default::default()),
                 ..Default::default()
             },
         }
@@ -378,7 +380,7 @@ impl Expr {
         Expr::Cast {
             expr: Arc::new(self),
             data_type,
-            strict: true,
+            options: CastOptions::Strict,
         }
     }
 
@@ -387,7 +389,16 @@ impl Expr {
         Expr::Cast {
             expr: Arc::new(self),
             data_type,
-            strict: false,
+            options: CastOptions::NonStrict,
+        }
+    }
+
+    /// Cast expression to another data type.
+    pub fn cast_with_options(self, data_type: DataType, cast_options: CastOptions) -> Self {
+        Expr::Cast {
+            expr: Arc::new(self),
+            data_type,
+            options: cast_options,
         }
     }
 
@@ -449,8 +460,8 @@ impl Expr {
     ///
     /// This has time complexity `O(n + k log(n))`.
     #[cfg(feature = "top_k")]
-    pub fn top_k(self, k: Expr, sort_options: SortOptions) -> Self {
-        self.apply_many_private(FunctionExpr::TopK { sort_options }, &[k], false, false)
+    pub fn top_k(self, k: Expr) -> Self {
+        self.apply_many_private(FunctionExpr::TopK { descending: false }, &[k], false, false)
     }
 
     /// Returns the `k` largest rows by given column.
@@ -461,26 +472,19 @@ impl Expr {
         self,
         k: K,
         by: E,
-        sort_options: SortMultipleOptions,
+        descending: Vec<bool>,
     ) -> Self {
         let mut args = vec![k.into()];
         args.extend(by.as_ref().iter().map(|e| -> Expr { e.clone().into() }));
-        self.apply_many_private(FunctionExpr::TopKBy { sort_options }, &args, false, false)
+        self.apply_many_private(FunctionExpr::TopKBy { descending }, &args, false, false)
     }
 
     /// Returns the `k` smallest elements.
     ///
     /// This has time complexity `O(n + k log(n))`.
     #[cfg(feature = "top_k")]
-    pub fn bottom_k(self, k: Expr, sort_options: SortOptions) -> Self {
-        self.apply_many_private(
-            FunctionExpr::TopK {
-                sort_options: sort_options.with_order_reversed(),
-            },
-            &[k],
-            false,
-            false,
-        )
+    pub fn bottom_k(self, k: Expr) -> Self {
+        self.apply_many_private(FunctionExpr::TopK { descending: true }, &[k], false, false)
     }
 
     /// Returns the `k` smallest rows by given column.
@@ -492,18 +496,12 @@ impl Expr {
         self,
         k: K,
         by: E,
-        sort_options: SortMultipleOptions,
+        descending: Vec<bool>,
     ) -> Self {
         let mut args = vec![k.into()];
         args.extend(by.as_ref().iter().map(|e| -> Expr { e.clone().into() }));
-        self.apply_many_private(
-            FunctionExpr::TopKBy {
-                sort_options: sort_options.with_order_reversed(),
-            },
-            &args,
-            false,
-            false,
-        )
+        let descending = descending.into_iter().map(|x| !x).collect();
+        self.apply_many_private(FunctionExpr::TopKBy { descending }, &args, false, false)
     }
 
     /// Reverse column
@@ -687,6 +685,12 @@ impl Expr {
         input.push(self);
         input.extend_from_slice(arguments);
 
+        let cast_to_supertypes = if cast_to_supertypes {
+            Some(Default::default())
+        } else {
+            None
+        };
+
         Expr::Function {
             input,
             function: function_expr,
@@ -709,6 +713,12 @@ impl Expr {
         let mut input = Vec::with_capacity(arguments.len() + 1);
         input.push(self);
         input.extend_from_slice(arguments);
+
+        let cast_to_supertypes = if cast_to_supertypes {
+            Some(Default::default())
+        } else {
+            None
+        };
 
         Expr::Function {
             input,
@@ -799,15 +809,15 @@ impl Expr {
         };
 
         self.function_with_options(
-            move |s: Series| Some(s.product()).transpose(),
+            move |s: Series| Some(s.product().map(|sc| sc.into_series(s.name()))).transpose(),
             GetOutput::map_dtype(|dt| {
-                use DataType::*;
-                match dt {
-                    Float32 => Float32,
-                    Float64 => Float64,
-                    UInt64 => UInt64,
-                    _ => Int64,
-                }
+                use DataType as T;
+                Ok(match dt {
+                    T::Float32 => T::Float32,
+                    T::Float64 => T::Float64,
+                    T::UInt64 => T::UInt64,
+                    _ => T::Int64,
+                })
             }),
             options,
         )
@@ -952,12 +962,13 @@ impl Expr {
     /// ╰────────┴────────╯
     /// ```
     pub fn over<E: AsRef<[IE]>, IE: Into<Expr> + Clone>(self, partition_by: E) -> Self {
-        self.over_with_options(partition_by, Default::default())
+        self.over_with_options(partition_by, None, Default::default())
     }
 
     pub fn over_with_options<E: AsRef<[IE]>, IE: Into<Expr> + Clone>(
         self,
         partition_by: E,
+        order_by: Option<(E, SortOptions)>,
         options: WindowMapping,
     ) -> Self {
         let partition_by = partition_by
@@ -965,9 +976,24 @@ impl Expr {
             .iter()
             .map(|e| e.clone().into())
             .collect();
+
+        let order_by = order_by.map(|(e, options)| {
+            let e = e.as_ref();
+            let e = if e.len() == 1 {
+                Arc::new(e[0].clone().into())
+            } else {
+                feature_gated!["dtype-struct", {
+                    let e = e.iter().map(|e| e.clone().into()).collect::<Vec<_>>();
+                    Arc::new(as_struct(e))
+                }]
+            };
+            (e, options)
+        });
+
         Expr::Window {
             function: Arc::new(self),
             partition_by,
+            order_by,
             options: options.into(),
         }
     }
@@ -980,6 +1006,7 @@ impl Expr {
         Expr::Window {
             function: Arc::new(self),
             partition_by: vec![index_col],
+            order_by: None,
             options: WindowType::Rolling(options),
         }
     }
@@ -992,7 +1019,7 @@ impl Expr {
             function: FunctionExpr::FillNull,
             options: FunctionOptions {
                 collect_groups: ApplyOptions::ElementWise,
-                cast_to_supertypes: true,
+                cast_to_supertypes: Some(Default::default()),
                 ..Default::default()
             },
         }
@@ -1237,67 +1264,134 @@ impl Expr {
         self.apply_private(FunctionExpr::Interpolate(method))
     }
 
+    #[cfg(feature = "rolling_window_by")]
+    #[allow(clippy::type_complexity)]
+    fn finish_rolling_by(
+        self,
+        by: Expr,
+        options: RollingOptionsDynamicWindow,
+        rolling_function_by: fn(RollingOptionsDynamicWindow) -> RollingFunctionBy,
+    ) -> Expr {
+        self.apply_many_private(
+            FunctionExpr::RollingExprBy(rolling_function_by(options)),
+            &[by],
+            false,
+            false,
+        )
+    }
+
+    #[cfg(feature = "interpolate_by")]
+    /// Fill null values using interpolation.
+    pub fn interpolate_by(self, by: Expr) -> Expr {
+        self.apply_many_private(FunctionExpr::InterpolateBy, &[by], false, false)
+    }
+
     #[cfg(feature = "rolling_window")]
     #[allow(clippy::type_complexity)]
     fn finish_rolling(
         self,
-        options: RollingOptions,
-        rolling_function: fn(RollingOptions) -> RollingFunction,
-        rolling_function_by: fn(RollingOptions) -> RollingFunction,
+        options: RollingOptionsFixedWindow,
+        rolling_function: fn(RollingOptionsFixedWindow) -> RollingFunction,
     ) -> Expr {
-        if let Some(ref by) = options.by {
-            let name = by.clone();
-            self.apply_many_private(
-                FunctionExpr::RollingExpr(rolling_function_by(options)),
-                &[col(&name)],
-                false,
-                false,
-            )
-        } else {
-            if !options.window_size.parsed_int {
-                panic!("if dynamic windows are used in a rolling aggregation, the 'by' argument must be set")
-            }
-            self.apply_private(FunctionExpr::RollingExpr(rolling_function(options)))
-        }
+        self.apply_private(FunctionExpr::RollingExpr(rolling_function(options)))
+    }
+
+    /// Apply a rolling minimum based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_min_by(self, by: Expr, options: RollingOptionsDynamicWindow) -> Expr {
+        self.finish_rolling_by(by, options, RollingFunctionBy::MinBy)
+    }
+
+    /// Apply a rolling maximum based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_max_by(self, by: Expr, options: RollingOptionsDynamicWindow) -> Expr {
+        self.finish_rolling_by(by, options, RollingFunctionBy::MaxBy)
+    }
+
+    /// Apply a rolling mean based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_mean_by(self, by: Expr, options: RollingOptionsDynamicWindow) -> Expr {
+        self.finish_rolling_by(by, options, RollingFunctionBy::MeanBy)
+    }
+
+    /// Apply a rolling sum based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_sum_by(self, by: Expr, options: RollingOptionsDynamicWindow) -> Expr {
+        self.finish_rolling_by(by, options, RollingFunctionBy::SumBy)
+    }
+
+    /// Apply a rolling quantile based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_quantile_by(
+        self,
+        by: Expr,
+        interpol: QuantileInterpolOptions,
+        quantile: f64,
+        mut options: RollingOptionsDynamicWindow,
+    ) -> Expr {
+        options.fn_params = Some(Arc::new(RollingQuantileParams {
+            prob: quantile,
+            interpol,
+        }) as Arc<dyn Any + Send + Sync>);
+
+        self.finish_rolling_by(by, options, RollingFunctionBy::QuantileBy)
+    }
+
+    /// Apply a rolling variance based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_var_by(self, by: Expr, options: RollingOptionsDynamicWindow) -> Expr {
+        self.finish_rolling_by(by, options, RollingFunctionBy::VarBy)
+    }
+
+    /// Apply a rolling std-dev based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_std_by(self, by: Expr, options: RollingOptionsDynamicWindow) -> Expr {
+        self.finish_rolling_by(by, options, RollingFunctionBy::StdBy)
+    }
+
+    /// Apply a rolling median based on another column.
+    #[cfg(feature = "rolling_window_by")]
+    pub fn rolling_median_by(self, by: Expr, options: RollingOptionsDynamicWindow) -> Expr {
+        self.rolling_quantile_by(by, QuantileInterpolOptions::Linear, 0.5, options)
     }
 
     /// Apply a rolling minimum.
     ///
     /// See: [`RollingAgg::rolling_min`]
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_min(self, options: RollingOptions) -> Expr {
-        self.finish_rolling(options, RollingFunction::Min, RollingFunction::MinBy)
+    pub fn rolling_min(self, options: RollingOptionsFixedWindow) -> Expr {
+        self.finish_rolling(options, RollingFunction::Min)
     }
 
     /// Apply a rolling maximum.
     ///
     /// See: [`RollingAgg::rolling_max`]
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_max(self, options: RollingOptions) -> Expr {
-        self.finish_rolling(options, RollingFunction::Max, RollingFunction::MaxBy)
+    pub fn rolling_max(self, options: RollingOptionsFixedWindow) -> Expr {
+        self.finish_rolling(options, RollingFunction::Max)
     }
 
     /// Apply a rolling mean.
     ///
     /// See: [`RollingAgg::rolling_mean`]
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_mean(self, options: RollingOptions) -> Expr {
-        self.finish_rolling(options, RollingFunction::Mean, RollingFunction::MeanBy)
+    pub fn rolling_mean(self, options: RollingOptionsFixedWindow) -> Expr {
+        self.finish_rolling(options, RollingFunction::Mean)
     }
 
     /// Apply a rolling sum.
     ///
     /// See: [`RollingAgg::rolling_sum`]
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_sum(self, options: RollingOptions) -> Expr {
-        self.finish_rolling(options, RollingFunction::Sum, RollingFunction::SumBy)
+    pub fn rolling_sum(self, options: RollingOptionsFixedWindow) -> Expr {
+        self.finish_rolling(options, RollingFunction::Sum)
     }
 
     /// Apply a rolling median.
     ///
     /// See: [`RollingAgg::rolling_median`]
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_median(self, options: RollingOptions) -> Expr {
+    pub fn rolling_median(self, options: RollingOptionsFixedWindow) -> Expr {
         self.rolling_quantile(QuantileInterpolOptions::Linear, 0.5, options)
     }
 
@@ -1309,30 +1403,26 @@ impl Expr {
         self,
         interpol: QuantileInterpolOptions,
         quantile: f64,
-        mut options: RollingOptions,
+        mut options: RollingOptionsFixedWindow,
     ) -> Expr {
         options.fn_params = Some(Arc::new(RollingQuantileParams {
             prob: quantile,
             interpol,
         }) as Arc<dyn Any + Send + Sync>);
 
-        self.finish_rolling(
-            options,
-            RollingFunction::Quantile,
-            RollingFunction::QuantileBy,
-        )
+        self.finish_rolling(options, RollingFunction::Quantile)
     }
 
     /// Apply a rolling variance.
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_var(self, options: RollingOptions) -> Expr {
-        self.finish_rolling(options, RollingFunction::Var, RollingFunction::VarBy)
+    pub fn rolling_var(self, options: RollingOptionsFixedWindow) -> Expr {
+        self.finish_rolling(options, RollingFunction::Var)
     }
 
     /// Apply a rolling std-dev.
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_std(self, options: RollingOptions) -> Expr {
-        self.finish_rolling(options, RollingFunction::Std, RollingFunction::StdBy)
+    pub fn rolling_std(self, options: RollingOptionsFixedWindow) -> Expr {
+        self.finish_rolling(options, RollingFunction::Std)
     }
 
     /// Apply a rolling skew.
@@ -1390,10 +1480,12 @@ impl Expr {
                     Ok(Some(out))
                 }
             },
-            GetOutput::map_field(|field| match field.data_type() {
-                DataType::Float64 => field.clone(),
-                DataType::Float32 => Field::new(field.name(), DataType::Float32),
-                _ => Field::new(field.name(), DataType::Float64),
+            GetOutput::map_field(|field| {
+                Ok(match field.data_type() {
+                    DataType::Float64 => field.clone(),
+                    DataType::Float32 => Field::new(field.name(), DataType::Float32),
+                    _ => Field::new(field.name(), DataType::Float64),
+                })
             }),
         )
         .with_fmt("rolling_map_float")
@@ -1417,7 +1509,25 @@ impl Expr {
 
     #[cfg(feature = "replace")]
     /// Replace the given values with other values.
-    pub fn replace<E: Into<Expr>>(
+    pub fn replace<E: Into<Expr>>(self, old: E, new: E) -> Expr {
+        let old = old.into();
+        let new = new.into();
+
+        // If we search and replace by literals, we can run on batches.
+        let literal_searchers = matches!(&old, Expr::Literal(_)) & matches!(&new, Expr::Literal(_));
+
+        let args = [old, new];
+
+        if literal_searchers {
+            self.map_many_private(FunctionExpr::Replace, &args, false, false)
+        } else {
+            self.apply_many_private(FunctionExpr::Replace, &args, false, false)
+        }
+    }
+
+    #[cfg(feature = "replace")]
+    /// Replace the given values with other values.
+    pub fn replace_strict<E: Into<Expr>>(
         self,
         old: E,
         new: E,
@@ -1426,7 +1536,8 @@ impl Expr {
     ) -> Expr {
         let old = old.into();
         let new = new.into();
-        // If we search and replace by literals, we can run on batches.
+
+        // If we replace by literals, we can run on batches.
         let literal_searchers = matches!(&old, Expr::Literal(_)) & matches!(&new, Expr::Literal(_));
 
         let mut args = vec![old, new];
@@ -1435,9 +1546,19 @@ impl Expr {
         }
 
         if literal_searchers {
-            self.map_many_private(FunctionExpr::Replace { return_dtype }, &args, false, false)
+            self.map_many_private(
+                FunctionExpr::ReplaceStrict { return_dtype },
+                &args,
+                false,
+                false,
+            )
         } else {
-            self.apply_many_private(FunctionExpr::Replace { return_dtype }, &args, false, false)
+            self.apply_many_private(
+                FunctionExpr::ReplaceStrict { return_dtype },
+                &args,
+                false,
+                false,
+            )
         }
     }
 
@@ -1577,9 +1698,9 @@ impl Expr {
         self.map_private(FunctionExpr::LowerBound)
     }
 
-    pub fn reshape(self, dimensions: &[i64]) -> Self {
+    pub fn reshape(self, dimensions: &[i64], nested_type: NestedType) -> Self {
         let dimensions = dimensions.to_vec();
-        self.apply_private(FunctionExpr::Reshape(dimensions))
+        self.apply_private(FunctionExpr::Reshape(dimensions, nested_type))
     }
 
     #[cfg(feature = "ewma")]
@@ -1590,12 +1711,9 @@ impl Expr {
 
     #[cfg(feature = "ewma_by")]
     /// Calculate the exponentially-weighted moving average by a time column.
-    pub fn ewm_mean_by(self, times: Expr, half_life: Duration, check_sorted: bool) -> Self {
+    pub fn ewm_mean_by(self, times: Expr, half_life: Duration) -> Self {
         self.apply_many_private(
-            FunctionExpr::EwmMeanBy {
-                half_life,
-                check_sorted,
-            },
+            FunctionExpr::EwmMeanBy { half_life },
             &[times],
             false,
             false,
@@ -1654,12 +1772,17 @@ impl Expr {
     #[cfg(feature = "dtype-struct")]
     /// Count all unique values and create a struct mapping value to count.
     /// (Note that it is better to turn parallel off in the aggregation context).
-    pub fn value_counts(self, sort: bool, parallel: bool) -> Self {
-        self.apply_private(FunctionExpr::ValueCounts { sort, parallel })
-            .with_function_options(|mut opts| {
-                opts.pass_name_to_apply = true;
-                opts
-            })
+    pub fn value_counts(self, sort: bool, parallel: bool, name: String, normalize: bool) -> Self {
+        self.apply_private(FunctionExpr::ValueCounts {
+            sort,
+            parallel,
+            name,
+            normalize,
+        })
+        .with_function_options(|mut opts| {
+            opts.pass_name_to_apply = true;
+            opts
+        })
     }
 
     #[cfg(feature = "unique_counts")]
@@ -1888,12 +2011,17 @@ pub fn len() -> Expr {
     Expr::Len
 }
 
-/// First column in DataFrame.
+/// First column in a DataFrame.
 pub fn first() -> Expr {
     Expr::Nth(0)
 }
 
-/// Last column in DataFrame.
+/// Last column in a DataFrame.
 pub fn last() -> Expr {
     Expr::Nth(-1)
+}
+
+/// Nth column in a DataFrame.
+pub fn nth(n: i64) -> Expr {
+    Expr::Nth(n)
 }

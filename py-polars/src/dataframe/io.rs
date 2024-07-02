@@ -1,11 +1,12 @@
 use std::io::BufWriter;
 use std::num::NonZeroUsize;
-use std::ops::Deref;
 
 #[cfg(feature = "avro")]
 use polars::io::avro::AvroCompression;
-use polars::io::mmap::ReaderBytes;
+use polars::io::mmap::try_create_file;
 use polars::io::RowIndex;
+#[cfg(feature = "parquet")]
+use polars_parquet::arrow::write::StatisticsOptions;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 
@@ -14,7 +15,8 @@ use super::*;
 use crate::conversion::parse_parquet_compression;
 use crate::conversion::Wrap;
 use crate::file::{
-    get_either_file, get_file_like, get_mmap_bytes_reader, read_if_bytesio, EitherRustPythonFile,
+    get_either_file, get_file_like, get_mmap_bytes_reader, get_mmap_bytes_reader_and_path,
+    read_if_bytesio, EitherRustPythonFile,
 };
 
 #[pymethods]
@@ -63,7 +65,10 @@ impl PyDataFrame {
     ) -> PyResult<Self> {
         let null_values = null_values.map(|w| w.0);
         let eol_char = eol_char.as_bytes()[0];
-        let row_index = row_index.map(|(name, offset)| RowIndex { name, offset });
+        let row_index = row_index.map(|(name, offset)| RowIndex {
+            name: Arc::from(name.as_str()),
+            offset,
+        });
         let quote_char = quote_char.and_then(|s| s.as_bytes().first().copied());
 
         let overwrite_dtype = overwrite_dtype.map(|overwrite_dtype| {
@@ -86,36 +91,40 @@ impl PyDataFrame {
         py_f = read_if_bytesio(py_f);
         let mmap_bytes_r = get_mmap_bytes_reader(&py_f)?;
         let df = py.allow_threads(move || {
-            CsvReader::new(mmap_bytes_r)
-                .infer_schema(infer_schema_length)
-                .has_header(has_header)
+            CsvReadOptions::default()
+                .with_path(path)
+                .with_infer_schema_length(infer_schema_length)
+                .with_has_header(has_header)
                 .with_n_rows(n_rows)
-                .with_separator(separator.as_bytes()[0])
                 .with_skip_rows(skip_rows)
                 .with_ignore_errors(ignore_errors)
-                .with_projection(projection)
+                .with_projection(projection.map(Arc::new))
                 .with_rechunk(rechunk)
                 .with_chunk_size(chunk_size)
-                .with_encoding(encoding.0)
-                .with_columns(columns)
+                .with_columns(columns.map(Arc::from))
                 .with_n_threads(n_threads)
-                .with_path(path)
-                .with_dtypes(overwrite_dtype.map(Arc::new))
-                .with_dtypes_slice(overwrite_dtype_slice.as_deref())
+                .with_schema_overwrite(overwrite_dtype.map(Arc::new))
+                .with_dtype_overwrite(overwrite_dtype_slice.map(Arc::new))
                 .with_schema(schema.map(|schema| Arc::new(schema.0)))
-                .low_memory(low_memory)
-                .with_null_values(null_values)
-                .with_missing_is_null(!missing_utf8_is_empty_string)
-                .with_comment_prefix(comment_prefix)
-                .with_try_parse_dates(try_parse_dates)
-                .with_quote_char(quote_char)
-                .with_end_of_line_char(eol_char)
+                .with_low_memory(low_memory)
                 .with_skip_rows_after_header(skip_rows_after_header)
                 .with_row_index(row_index)
-                .sample_size(sample_size)
-                .raise_if_empty(raise_if_empty)
-                .truncate_ragged_lines(truncate_ragged_lines)
-                .with_decimal_comma(decimal_comma)
+                .with_sample_size(sample_size)
+                .with_raise_if_empty(raise_if_empty)
+                .with_parse_options(
+                    CsvParseOptions::default()
+                        .with_separator(separator.as_bytes()[0])
+                        .with_encoding(encoding.0)
+                        .with_missing_is_null(!missing_utf8_is_empty_string)
+                        .with_comment_prefix(comment_prefix)
+                        .with_null_values(null_values)
+                        .with_try_parse_dates(try_parse_dates)
+                        .with_quote_char(quote_char)
+                        .with_eol_char(eol_char)
+                        .with_truncate_ragged_lines(truncate_ragged_lines)
+                        .with_decimal_comma(decimal_comma),
+                )
+                .into_reader_with_file_handle(mmap_bytes_r)
                 .finish()
                 .map_err(PyPolarsErr::from)
         })?;
@@ -139,7 +148,10 @@ impl PyDataFrame {
     ) -> PyResult<Self> {
         use EitherRustPythonFile::*;
 
-        let row_index = row_index.map(|(name, offset)| RowIndex { name, offset });
+        let row_index = row_index.map(|(name, offset)| RowIndex {
+            name: Arc::from(name.as_str()),
+            offset,
+        });
         let result = match get_either_file(py_f, false)? {
             Py(f) => {
                 let buf = f.as_buffer();
@@ -181,44 +193,26 @@ impl PyDataFrame {
         schema: Option<Wrap<Schema>>,
         schema_overrides: Option<Wrap<Schema>>,
     ) -> PyResult<Self> {
-        // memmap the file first.
-
+        assert!(infer_schema_length != Some(0));
         use crate::file::read_if_bytesio;
         py_f = read_if_bytesio(py_f);
         let mmap_bytes_r = get_mmap_bytes_reader(&py_f)?;
 
         py.allow_threads(move || {
-            let mmap_read: ReaderBytes = (&mmap_bytes_r).into();
-            let bytes = mmap_read.deref();
-            // Happy path is our column oriented json as that is most performant,
-            // on failure we try the arrow json reader instead, which is row-oriented.
-            match serde_json::from_slice::<DataFrame>(bytes) {
-                Ok(df) => Ok(df.into()),
-                Err(e) => {
-                    let msg = format!("{e}");
-                    if msg.contains("successful parse invalid data") {
-                        let e = PyPolarsErr::from(PolarsError::ComputeError(msg.into()));
-                        Err(PyErr::from(e))
-                    } else {
-                        let mut builder = JsonReader::new(mmap_bytes_r)
-                            .with_json_format(JsonFormat::Json)
-                            .infer_schema_len(infer_schema_length);
+            let mut builder = JsonReader::new(mmap_bytes_r)
+                .with_json_format(JsonFormat::Json)
+                .infer_schema_len(infer_schema_length.and_then(NonZeroUsize::new));
 
-                        if let Some(schema) = schema {
-                            builder = builder.with_schema(Arc::new(schema.0));
-                        }
-
-                        if let Some(schema) = schema_overrides.as_ref() {
-                            builder = builder.with_schema_overwrite(&schema.0);
-                        }
-
-                        let out = builder
-                            .finish()
-                            .map_err(|e| PyPolarsErr::Other(format!("{e}")))?;
-                        Ok(out.into())
-                    }
-                },
+            if let Some(schema) = schema {
+                builder = builder.with_schema(Arc::new(schema.0));
             }
+
+            if let Some(schema) = schema_overrides.as_ref() {
+                builder = builder.with_schema_overwrite(&schema.0);
+            }
+
+            let out = builder.finish().map_err(PyPolarsErr::from)?;
+            Ok(out.into())
         })
     }
 
@@ -264,16 +258,21 @@ impl PyDataFrame {
         row_index: Option<(String, IdxSize)>,
         memory_map: bool,
     ) -> PyResult<Self> {
-        let row_index = row_index.map(|(name, offset)| RowIndex { name, offset });
+        let row_index = row_index.map(|(name, offset)| RowIndex {
+            name: Arc::from(name.as_str()),
+            offset,
+        });
         py_f = read_if_bytesio(py_f);
-        let mmap_bytes_r = get_mmap_bytes_reader(&py_f)?;
+        let (mmap_bytes_r, mmap_path) = get_mmap_bytes_reader_and_path(&py_f)?;
+
+        let mmap_path = if memory_map { mmap_path } else { None };
         let df = py.allow_threads(move || {
             IpcReader::new(mmap_bytes_r)
                 .with_projection(projection)
                 .with_columns(columns)
                 .with_n_rows(n_rows)
                 .with_row_index(row_index)
-                .memory_mapped(memory_map)
+                .memory_mapped(mmap_path)
                 .finish()
                 .map_err(PyPolarsErr::from)
         })?;
@@ -292,7 +291,10 @@ impl PyDataFrame {
         row_index: Option<(String, IdxSize)>,
         rechunk: bool,
     ) -> PyResult<Self> {
-        let row_index = row_index.map(|(name, offset)| RowIndex { name, offset });
+        let row_index = row_index.map(|(name, offset)| RowIndex {
+            name: Arc::from(name.as_str()),
+            offset,
+        });
         py_f = read_if_bytesio(py_f);
         let mmap_bytes_r = get_mmap_bytes_reader(&py_f)?;
         let df = py.allow_threads(move || {
@@ -346,6 +348,7 @@ impl PyDataFrame {
         datetime_format: Option<String>,
         date_format: Option<String>,
         time_format: Option<String>,
+        float_scientific: Option<bool>,
         float_precision: Option<usize>,
         null_value: Option<String>,
         quote_style: Option<Wrap<QuoteStyle>>,
@@ -366,6 +369,7 @@ impl PyDataFrame {
                     .with_datetime_format(datetime_format)
                     .with_date_format(date_format)
                     .with_time_format(time_format)
+                    .with_float_scientific(float_scientific)
                     .with_float_precision(float_precision)
                     .with_null_value(null)
                     .with_quote_style(quote_style.map(|wrap| wrap.0).unwrap_or_default())
@@ -384,6 +388,7 @@ impl PyDataFrame {
                 .with_datetime_format(datetime_format)
                 .with_date_format(date_format)
                 .with_time_format(time_format)
+                .with_float_scientific(float_scientific)
                 .with_float_precision(float_precision)
                 .with_null_value(null)
                 .with_quote_style(quote_style.map(|wrap| wrap.0).unwrap_or_default())
@@ -402,7 +407,7 @@ impl PyDataFrame {
         py_f: PyObject,
         compression: &str,
         compression_level: Option<i32>,
-        statistics: bool,
+        statistics: Wrap<StatisticsOptions>,
         row_group_size: Option<usize>,
         data_page_size: Option<usize>,
     ) -> PyResult<()> {
@@ -413,7 +418,7 @@ impl PyDataFrame {
             py.allow_threads(|| {
                 ParquetWriter::new(f)
                     .with_compression(compression)
-                    .with_statistics(statistics)
+                    .with_statistics(statistics.0)
                     .with_row_group_size(row_group_size)
                     .with_data_page_size(data_page_size)
                     .finish(&mut self.df)
@@ -423,7 +428,7 @@ impl PyDataFrame {
             let buf = get_file_like(py_f, true)?;
             ParquetWriter::new(buf)
                 .with_compression(compression)
-                .with_statistics(statistics)
+                .with_statistics(statistics.0)
                 .with_row_group_size(row_group_size)
                 .with_data_page_size(data_page_size)
                 .finish(&mut self.df)
@@ -434,20 +439,13 @@ impl PyDataFrame {
     }
 
     #[cfg(feature = "json")]
-    pub fn write_json(&mut self, py_f: PyObject, pretty: bool, row_oriented: bool) -> PyResult<()> {
+    pub fn write_json(&mut self, py_f: PyObject) -> PyResult<()> {
         let file = BufWriter::new(get_file_like(py_f, true)?);
 
-        let r = match (pretty, row_oriented) {
-            (_, true) => JsonWriter::new(file)
-                .with_json_format(JsonFormat::Json)
-                .finish(&mut self.df),
-            (true, _) => serde_json::to_writer_pretty(file, &self.df)
-                .map_err(|e| polars_err!(ComputeError: "{e}")),
-            (false, _) => {
-                serde_json::to_writer(file, &self.df).map_err(|e| polars_err!(ComputeError: "{e}"))
-            },
-        };
-        r.map_err(|e| PyPolarsErr::Other(format!("{e}")))?;
+        JsonWriter::new(file)
+            .with_json_format(JsonFormat::Json)
+            .finish(&mut self.df)
+            .map_err(PyPolarsErr::from)?;
         Ok(())
     }
 
@@ -455,11 +453,11 @@ impl PyDataFrame {
     pub fn write_ndjson(&mut self, py_f: PyObject) -> PyResult<()> {
         let file = BufWriter::new(get_file_like(py_f, true)?);
 
-        let r = JsonWriter::new(file)
+        JsonWriter::new(file)
             .with_json_format(JsonFormat::JsonLines)
-            .finish(&mut self.df);
+            .finish(&mut self.df)
+            .map_err(PyPolarsErr::from)?;
 
-        r.map_err(|e| PyPolarsErr::Other(format!("{e}")))?;
         Ok(())
     }
 
@@ -472,7 +470,9 @@ impl PyDataFrame {
         future: bool,
     ) -> PyResult<()> {
         if let Ok(s) = py_f.extract::<PyBackedStr>(py) {
-            let f = std::fs::File::create(&*s)?;
+            let s: &str = s.as_ref();
+            let path = std::path::Path::new(s);
+            let f = try_create_file(path).map_err(PyPolarsErr::from)?;
             py.allow_threads(|| {
                 IpcWriter::new(f)
                     .with_compression(compression.0)
@@ -498,12 +498,14 @@ impl PyDataFrame {
         py: Python,
         py_f: PyObject,
         compression: Wrap<Option<IpcCompression>>,
+        future: bool,
     ) -> PyResult<()> {
         if let Ok(s) = py_f.extract::<PyBackedStr>(py) {
             let f = std::fs::File::create(&*s)?;
             py.allow_threads(|| {
                 IpcStreamWriter::new(f)
                     .with_compression(compression.0)
+                    .with_pl_flavor(future)
                     .finish(&mut self.df)
                     .map_err(PyPolarsErr::from)
             })?;
@@ -512,6 +514,7 @@ impl PyDataFrame {
 
             IpcStreamWriter::new(&mut buf)
                 .with_compression(compression.0)
+                .with_pl_flavor(future)
                 .finish(&mut self.df)
                 .map_err(PyPolarsErr::from)?;
         }

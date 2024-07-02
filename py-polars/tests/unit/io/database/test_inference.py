@@ -12,7 +12,7 @@ from polars.io.database._inference import _infer_dtype_from_database_typename
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from polars.datatypes import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 @pytest.mark.parametrize(
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         # string types
         ("UTF16", pl.String),
         ("char(8)", pl.String),
+        ("BPCHAR", pl.String),
         ("nchar[128]", pl.String),
         ("varchar", pl.String),
         ("CHARACTER VARYING(64)", pl.String),
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
         ("ROWID", pl.UInt64),
         ("mediumint", pl.Int32),
         ("unsigned mediumint", pl.UInt32),
+        ("cardinal_number", pl.UInt64),
         ("smallserial", pl.Int16),
         ("serial", pl.Int32),
         ("bigserial", pl.Int64),

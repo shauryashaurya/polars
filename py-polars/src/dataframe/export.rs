@@ -1,12 +1,12 @@
-use polars::frame::ArrowChunk;
+use polars::export::arrow::record_batch::RecordBatch;
 use polars_core::export::arrow::datatypes::IntegerType;
-use polars_core::utils::arrow::compute::cast::CastOptions;
+use polars_core::utils::arrow::compute::cast::CastOptionsImpl;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 
 use super::*;
-use crate::arrow_interop;
 use crate::conversion::{ObjectValue, Wrap};
+use crate::interop;
 
 #[pymethods]
 impl PyDataFrame {
@@ -63,7 +63,7 @@ impl PyDataFrame {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    pub fn to_arrow(&mut self) -> PyResult<Vec<PyObject>> {
+    pub fn to_arrow(&mut self, future: bool) -> PyResult<Vec<PyObject>> {
         self.df.align_chunks();
         Python::with_gil(|py| {
             let pyarrow = py.import_bound("pyarrow")?;
@@ -71,8 +71,8 @@ impl PyDataFrame {
 
             let rbs = self
                 .df
-                .iter_chunks(false)
-                .map(|rb| arrow_interop::to_py::to_py_rb(&rb, &names, py, &pyarrow))
+                .iter_chunks(future, true)
+                .map(|rb| interop::arrow::to_py::to_py_rb(&rb, &names, py, &pyarrow))
                 .collect::<PyResult<_>>()?;
             Ok(rbs)
         })
@@ -104,7 +104,7 @@ impl PyDataFrame {
                 .collect::<Vec<_>>();
             let rbs = self
                 .df
-                .iter_chunks(false)
+                .iter_chunks(false, true)
                 .map(|rb| {
                     let mut rb = rb.into_arrays();
                     for i in &cat_columns {
@@ -116,14 +116,14 @@ impl PyDataFrame {
                                 Box::new(ArrowDataType::LargeUtf8),
                                 false,
                             ),
-                            CastOptions::default(),
+                            CastOptionsImpl::default(),
                         )
                         .unwrap();
                         *arr = out;
                     }
-                    let rb = ArrowChunk::new(rb);
+                    let rb = RecordBatch::new(rb);
 
-                    arrow_interop::to_py::to_py_rb(&rb, &names, py, &pyarrow)
+                    interop::arrow::to_py::to_py_rb(&rb, &names, py, &pyarrow)
                 })
                 .collect::<PyResult<_>>()?;
             Ok(rbs)

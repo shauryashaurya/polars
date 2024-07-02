@@ -144,7 +144,7 @@ jobs:
         if: matrix.architecture == 'x86-64'
         env:
           FEATURES: ${{ steps.features.outputs.features }}
-          CFG: ${{ matrix.package == 'polars-lts-cpu' && '--cfg default_allocator' || '' }}
+          CFG: ${{ matrix.package == 'polars-lts-cpu' && '--cfg allocator="default"' || '' }}
         run: echo "RUSTFLAGS=-C target-feature=${{ steps.features.outputs.features }} $CFG" >> $GITHUB_ENV
 
       - name: Set variables in CPU check module
@@ -270,13 +270,14 @@ jobs:
           TAG: ${{ steps.github-release.outputs.tag_name }}
 
       - name: Trigger other workflows related to the release
-        if: inputs.dry-run == false && steps.version.outputs.is_prerelease == 'false'
+        if: inputs.dry-run == false
         uses: peter-evans/repository-dispatch@v3
         with:
           event-type: python-release
           client-payload: >
             {
               "version": "${{ steps.version.outputs.version }}",
+              "is_prerelease": "${{ steps.version.outputs.is_prerelease }}",
               "tag": "${{ steps.github-release.outputs.tag_name }}",
               "sha": "${{ inputs.sha || github.sha }}"
             }

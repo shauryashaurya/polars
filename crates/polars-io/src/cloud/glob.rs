@@ -108,9 +108,13 @@ impl CloudLocation {
             (bucket, key)
         };
 
-        let key = percent_encoding::percent_decode_str(key)
-            .decode_utf8()
-            .map_err(to_compute_err)?;
+        let key = if parsed.scheme().starts_with("http") {
+            percent_encoding::percent_decode_str(key)
+                .decode_utf8()
+                .map_err(to_compute_err)?
+        } else {
+            std::borrow::Cow::Borrowed(key)
+        };
         let (mut prefix, expansion) = extract_prefix_expansion(&key)?;
         if is_local && key.starts_with(DELIMITER) {
             prefix.insert(0, DELIMITER);
@@ -164,7 +168,6 @@ impl Matcher {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
 /// List files with a prefix derived from the pattern.
 pub async fn glob(url: &str, cloud_options: Option<&CloudOptions>) -> PolarsResult<Vec<String>> {
     // Find the fixed prefix, up to the first '*'.
@@ -178,16 +181,25 @@ pub async fn glob(url: &str, cloud_options: Option<&CloudOptions>) -> PolarsResu
         },
         store,
     ) = super::build_object_store(url, cloud_options).await?;
-    let matcher = Matcher::new(prefix.clone(), expansion.as_deref())?;
+    let matcher = Matcher::new(
+        if scheme == "file" {
+            // For local paths the returned location has the leading slash stripped.
+            prefix[1..].to_string()
+        } else {
+            prefix.clone()
+        },
+        expansion.as_deref(),
+    )?;
 
     let list_stream = store
         .list(Some(&Path::from(prefix)))
         .map_err(to_compute_err);
-    let locations: Vec<Path> = list_stream
+    let mut locations: Vec<Path> = list_stream
         .then(|entry| async { Ok::<_, PolarsError>(entry.map_err(to_compute_err)?.location) })
         .filter(|name| ready(name.as_ref().map_or(true, |name| matcher.is_matching(name))))
         .try_collect()
         .await?;
+    locations.sort_unstable();
     Ok(locations
         .into_iter()
         .map(|l| full_url(&scheme, &bucket, l))

@@ -12,8 +12,8 @@ from polars.datatypes import dtype_to_ffiname
 
 if TYPE_CHECKING:
     from polars import Series
+    from polars._typing import PolarsDataType
     from polars.polars import PySeries
-    from polars.type_aliases import PolarsDataType
 
     if sys.version_info >= (3, 10):
         from typing import ParamSpec
@@ -32,7 +32,7 @@ def expr_dispatch(cls: type[T]) -> type[T]:
     * Applied to the Series class, and/or any Series 'NameSpace' classes.
     * Walks the class attributes, looking for methods that have empty function
       bodies, with signatures compatible with an existing Expr function.
-    * IIF both conditions are met, the empty method is decorated with @call_expr.
+    * IFF both conditions are met, the empty method is decorated with @call_expr.
     """
     # create lookup of expression functions in this namespace
     namespace = getattr(cls, "_accessor", None)

@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING, Any, Iterable, Sequence, overload
 
 from polars import functions as F
 from polars.datatypes import (
-    FLOAT_DTYPES,
-    INTEGER_DTYPES,
     Date,
     Datetime,
     Float64,
@@ -16,6 +14,7 @@ from polars.datatypes import (
     Struct,
     Time,
 )
+from polars.datatypes.group import FLOAT_DTYPES, INTEGER_DTYPES
 from polars.dependencies import json
 from polars.exceptions import DuplicateError
 from polars.selectors import _expand_selector_dicts, _expand_selectors
@@ -28,7 +27,7 @@ if TYPE_CHECKING:
     from xlsxwriter.worksheet import Worksheet
 
     from polars import DataFrame, Series
-    from polars.type_aliases import (
+    from polars._typing import (
         ColumnFormatDict,
         ColumnTotalsDefinition,
         ConditionalFormatDict,
@@ -250,20 +249,18 @@ def _xl_inject_dummy_table_columns(
                 df_select_cols.insert(insert_idx, col)
 
     df = df.select(
-        [
-            (
-                col
-                if col in df_original_columns
-                else (
-                    F.lit(None).cast(
-                        cast_lookup.get(col, dtype)  # type:ignore[arg-type]
-                    )
-                    if dtype or (col in cast_lookup and cast_lookup[col] is not None)
-                    else F.lit(None)
-                ).alias(col)
-            )
-            for col in df_select_cols
-        ]
+        (
+            col
+            if col in df_original_columns
+            else (
+                F.lit(None).cast(
+                    cast_lookup.get(col, dtype)  # type:ignore[arg-type]
+                )
+                if dtype or (col in cast_lookup and cast_lookup[col] is not None)
+                else F.lit(None)
+            ).alias(col)
+        )
+        for col in df_select_cols
     )
     return df
 

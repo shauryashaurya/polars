@@ -7,8 +7,6 @@ from inspect import isclass
 from typing import TYPE_CHECKING, Any
 
 from polars.datatypes import (
-    INTEGER_DTYPES,
-    UNSIGNED_INTEGER_DTYPES,
     Binary,
     Boolean,
     Date,
@@ -30,10 +28,14 @@ from polars.datatypes import (
     UInt32,
     UInt64,
 )
-from polars.datatypes.convert import _map_py_type_to_dtype
+from polars.datatypes._parse import parse_py_type_into_dtype
+from polars.datatypes.group import (
+    INTEGER_DTYPES,
+    UNSIGNED_INTEGER_DTYPES,
+)
 
 if TYPE_CHECKING:
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 def _infer_dtype_from_database_typename(
@@ -141,6 +143,10 @@ def _infer_dtype_from_database_typename(
         else:
             dtype = _integer_dtype_from_nbits(sz, unsigned=False, default=Int64)
 
+    # number types (note: 'number' alone is not that helpful and requires refinement)
+    elif "NUMBER" in value and "CARDINAL" in value:
+        dtype = UInt64
+
     # decimal dtypes
     elif (is_dec := ("DECIMAL" in value)) or ("NUMERIC" in value):
         if "," in modifier:
@@ -152,7 +158,7 @@ def _infer_dtype_from_database_typename(
     # string dtypes
     elif (
         any(tp in value for tp in ("VARCHAR", "STRING", "TEXT", "UNICODE"))
-        or value.startswith(("STR", "CHAR", "NCHAR", "UTF"))
+        or value.startswith(("STR", "CHAR", "BPCHAR", "NCHAR", "UTF"))
         or value.endswith(("_UTF8", "_UTF16", "_UTF32"))
     ):
         dtype = String
@@ -203,7 +209,7 @@ def _infer_dtype_from_cursor_description(
     if isclass(type_code):
         # python types, eg: int, float, str, etc
         with suppress(TypeError):
-            dtype = _map_py_type_to_dtype(type_code)  # type: ignore[arg-type]
+            dtype = parse_py_type_into_dtype(type_code)  # type: ignore[arg-type]
 
     elif isinstance(type_code, str):
         # database/sql type names, eg: "VARCHAR", "NUMERIC", "BLOB", etc

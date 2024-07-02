@@ -1,5 +1,7 @@
 use std::fmt::Write;
 
+#[cfg(feature = "dtype-categorical")]
+use crate::chunked_array::cast::CastOptions;
 #[cfg(feature = "object")]
 use crate::chunked_array::object::registry::ObjectRegistry;
 use crate::prelude::*;
@@ -58,8 +60,17 @@ impl Series {
         let dtype = if strict {
             get_first_non_null_dtype(values)
         } else {
+            // Currently does not work correctly for Decimal because equality is not implemented.
             any_values_to_supertype(values)?
         };
+
+        // TODO: Remove this when Decimal data type equality is implemented.
+        #[cfg(feature = "dtype-decimal")]
+        if !strict && dtype.is_decimal() {
+            let dtype = DataType::Decimal(None, None);
+            return Self::from_any_values_and_dtype(name, values, &dtype, strict);
+        }
+
         Self::from_any_values_and_dtype(name, values, &dtype, strict)
     }
 
@@ -74,25 +85,47 @@ impl Series {
         dtype: &DataType,
         strict: bool,
     ) -> PolarsResult<Self> {
+        use crate::chunked_array::metadata::MetadataCollectable;
+
         if values.is_empty() {
             return Ok(Self::new_empty(name, dtype));
         }
 
         let mut s = match dtype {
             #[cfg(feature = "dtype-i8")]
-            DataType::Int8 => any_values_to_integer::<Int8Type>(values, strict)?.into_series(),
+            DataType::Int8 => any_values_to_integer::<Int8Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
             #[cfg(feature = "dtype-i16")]
-            DataType::Int16 => any_values_to_integer::<Int16Type>(values, strict)?.into_series(),
-            DataType::Int32 => any_values_to_integer::<Int32Type>(values, strict)?.into_series(),
-            DataType::Int64 => any_values_to_integer::<Int64Type>(values, strict)?.into_series(),
+            DataType::Int16 => any_values_to_integer::<Int16Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
+            DataType::Int32 => any_values_to_integer::<Int32Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
+            DataType::Int64 => any_values_to_integer::<Int64Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
             #[cfg(feature = "dtype-u8")]
-            DataType::UInt8 => any_values_to_integer::<UInt8Type>(values, strict)?.into_series(),
+            DataType::UInt8 => any_values_to_integer::<UInt8Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
             #[cfg(feature = "dtype-u16")]
-            DataType::UInt16 => any_values_to_integer::<UInt16Type>(values, strict)?.into_series(),
-            DataType::UInt32 => any_values_to_integer::<UInt32Type>(values, strict)?.into_series(),
-            DataType::UInt64 => any_values_to_integer::<UInt64Type>(values, strict)?.into_series(),
-            DataType::Float32 => any_values_to_f32(values, strict)?.into_series(),
-            DataType::Float64 => any_values_to_f64(values, strict)?.into_series(),
+            DataType::UInt16 => any_values_to_integer::<UInt16Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
+            DataType::UInt32 => any_values_to_integer::<UInt32Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
+            DataType::UInt64 => any_values_to_integer::<UInt64Type>(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
+            DataType::Float32 => any_values_to_f32(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
+            DataType::Float64 => any_values_to_f64(values, strict)?
+                .with_cheap_metadata()
+                .into_series(),
             DataType::Boolean => any_values_to_bool(values, strict)?.into_series(),
             DataType::String => any_values_to_string(values, strict)?.into_series(),
             DataType::Binary => any_values_to_binary(values, strict)?.into_series(),
@@ -112,7 +145,7 @@ impl Series {
             },
             #[cfg(feature = "dtype-decimal")]
             DataType::Decimal(precision, scale) => {
-                any_values_to_decimal(values, *precision, *scale)?.into_series()
+                any_values_to_decimal(values, *precision, *scale, strict)?.into_series()
             },
             DataType::List(inner) => any_values_to_list(values, inner, strict)?.into_series(),
             #[cfg(feature = "dtype-array")]
@@ -167,6 +200,7 @@ fn any_values_to_integer<T: PolarsIntegerType>(
         }
         Ok(builder.finish())
     }
+
     if strict {
         any_values_to_integer_strict::<T>(values)
     } else {
@@ -409,7 +443,7 @@ fn any_values_to_categorical(
     if strict {
         ca.into_series().strict_cast(dtype)
     } else {
-        ca.cast(dtype)
+        ca.cast_with_options(dtype, CastOptions::NonStrict)
     }
 }
 
@@ -418,64 +452,53 @@ fn any_values_to_decimal(
     values: &[AnyValue],
     precision: Option<usize>,
     scale: Option<usize>, // If None, we're inferring the scale.
+    strict: bool,
 ) -> PolarsResult<DecimalChunked> {
-    // Two-pass approach, first we scan and record the scales, then convert (or not).
-    let mut scale_range: Option<(usize, usize)> = None;
-    for av in values {
-        let s_av = if av.is_integer() {
-            0 // Integers are treated as decimals with scale of zero.
-        } else if let AnyValue::Decimal(_, scale) = av {
-            *scale
-        } else if av.is_null() {
-            continue;
-        } else {
-            polars_bail!(
-                ComputeError: "unable to convert any-value of dtype {} to decimal", av.dtype(),
-            );
-        };
-        scale_range = match scale_range {
-            None => Some((s_av, s_av)),
-            Some((s_min, s_max)) => Some((s_min.min(s_av), s_max.max(s_av))),
-        };
+    /// Get the maximum scale among AnyValues
+    fn infer_scale(
+        values: &[AnyValue],
+        precision: Option<usize>,
+        strict: bool,
+    ) -> PolarsResult<usize> {
+        let mut max_scale = 0;
+        for av in values {
+            let av_scale = match av {
+                AnyValue::Decimal(_, scale) => *scale,
+                AnyValue::Null => continue,
+                av => {
+                    if strict {
+                        let target_dtype = DataType::Decimal(precision, None);
+                        return Err(invalid_value_error(&target_dtype, av));
+                    }
+                    continue;
+                },
+            };
+            max_scale = max_scale.max(av_scale);
+        }
+        Ok(max_scale)
     }
-    let Some((s_min, s_max)) = scale_range else {
-        // Empty array or all nulls, return a decimal array with given scale (or 0 if inferring).
-        return Ok(Int128Chunked::full_null("", values.len())
-            .into_decimal_unchecked(precision, scale.unwrap_or(0)));
+    let scale = match scale {
+        Some(s) => s,
+        None => infer_scale(values, precision, strict)?,
     };
-    let scale = scale.unwrap_or(s_max);
-    if s_max > scale {
-        // Scale is provided but is lower than actual.
-        // TODO: Do we want lossy conversions here or not?
-        polars_bail!(
-            ComputeError:
-            "unable to losslessly convert any-value of scale {s_max} to scale {}", scale,
-        );
-    }
+    let target_dtype = DataType::Decimal(precision, Some(scale));
 
     let mut builder = PrimitiveChunkedBuilder::<Int128Type>::new("", values.len());
-    let is_equally_scaled = s_min == s_max && s_max == scale;
     for av in values {
-        let (v, s_av) = if av.is_integer() {
-            (
-                av.try_extract::<i128>().unwrap_or_else(|_| unreachable!()),
-                0,
-            )
-        } else if let AnyValue::Decimal(v, scale) = av {
-            (*v, *scale)
-        } else {
-            // It has to be a null because we've already checked it.
-            builder.append_null();
-            continue;
+        match av {
+            AnyValue::Decimal(v, s) if *s == scale => builder.append_value(*v),
+            AnyValue::Null => builder.append_null(),
+            av => {
+                if strict {
+                    return Err(invalid_value_error(&target_dtype, av));
+                }
+                // TODO: Precision check, else set to null
+                match av.strict_cast(&target_dtype) {
+                    Some(AnyValue::Decimal(i, _)) => builder.append_value(i),
+                    _ => builder.append_null(),
+                }
+            },
         };
-        if is_equally_scaled {
-            builder.append_value(v);
-        } else {
-            let factor = 10_i128.pow((scale - s_av) as _); // this cast is safe
-            builder.append_value(v.checked_mul(factor).ok_or_else(|| {
-                polars_err!(ComputeError: "overflow while converting to decimal scale {}", scale)
-            })?);
-        }
     }
 
     // Build the array and do a precision check if needed.
@@ -723,7 +746,7 @@ fn any_values_to_object(
                     AnyValue::Object(val) => builder.append_value(val.as_any()),
                     AnyValue::Null => builder.append_null(),
                     _ => {
-                        polars_bail!(ComputeError: "expected object");
+                        polars_bail!(SchemaMismatch: "expected object");
                     },
                 }
             }

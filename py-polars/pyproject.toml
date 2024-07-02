@@ -33,35 +33,51 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://www.pola.rs/"
-Documentation = "https://docs.pola.rs/py-polars/html/reference/index.html"
+Documentation = "https://docs.pola.rs/api/python/stable/reference/index.html"
 Repository = "https://github.com/pola-rs/polars"
 Changelog = "https://github.com/pola-rs/polars/releases"
 
 [project.optional-dependencies]
 # NOTE: keep this list in sync with show_versions() and requirements-dev.txt
-adbc = ["adbc_driver_manager", "adbc_driver_sqlite"]
-async = ["nest_asyncio"]
-cloudpickle = ["cloudpickle"]
-connectorx = ["connectorx >= 0.3.2"]
-deltalake = ["deltalake >= 0.15.0"]
-fastexcel = ["fastexcel >= 0.9"]
-fsspec = ["fsspec"]
-gevent = ["gevent"]
-matplotlib = ["matplotlib"]
-numpy = ["numpy >= 1.16.0"]
-openpyxl = ["openpyxl >= 3.0.0"]
-pandas = ["pyarrow >= 7.0.0", "pandas"]
-plot = ["hvplot >= 0.9.1"]
+# Interop
+# TODO: Remove NumPy upper bound once we support NumPy 2.0.0
+# https://github.com/pola-rs/polars/issues/16998
+numpy = ["numpy >= 1.16.0, < 2.0.0"]
+pandas = ["pandas", "polars[pyarrow]"]
 pyarrow = ["pyarrow >= 7.0.0"]
 pydantic = ["pydantic"]
-pyiceberg = ["pyiceberg >= 0.5.0"]
-pyxlsb = ["pyxlsb >= 1.0"]
-sqlalchemy = ["sqlalchemy", "pandas"]
-timezone = ["backports.zoneinfo; python_version < '3.9'", "tzdata; platform_system == 'Windows'"]
+
+# Excel
+calamine = ["fastexcel >= 0.9"]
+openpyxl = ["openpyxl >= 3.0.0"]
 xlsx2csv = ["xlsx2csv >= 0.8.0"]
 xlsxwriter = ["xlsxwriter"]
+excel = ["polars[calamine,openpyxl,xlsx2csv,xlsxwriter]"]
+
+# Database
+adbc = ["adbc-driver-manager[dbapi]", "adbc-driver-sqlite[dbapi]"]
+connectorx = ["connectorx >= 0.3.2"]
+sqlalchemy = ["sqlalchemy", "polars[pandas]"]
+database = ["polars[adbc,connectorx,sqlalchemy]", "nest-asyncio"]
+
+# Cloud
+fsspec = ["fsspec"]
+
+# Other I/O
+deltalake = ["deltalake >= 0.15.0"]
+iceberg = ["pyiceberg >= 0.5.0"]
+
+# Other
+async = ["gevent"]
+cloudpickle = ["cloudpickle"]
+graph = ["matplotlib"]
+plot = ["hvplot >= 0.9.1", "polars[pandas]"]
+style = ["great-tables >= 0.8.0"]
+timezone = ["backports.zoneinfo; python_version < '3.9'", "tzdata; platform_system == 'Windows'"]
+
+# All
 all = [
-  "polars[adbc,async,cloudpickle,connectorx,deltalake,fastexcel,fsspec,gevent,numpy,pandas,plot,pyarrow,pydantic,pyiceberg,sqlalchemy,timezone,xlsx2csv,xlsxwriter]",
+  "polars[async,cloudpickle,database,deltalake,excel,fsspec,graph,iceberg,numpy,pandas,plot,pyarrow,pydantic,style,timezone]",
 ]
 
 [tool.maturin]
@@ -90,7 +106,9 @@ module = [
   "deltalake.*",
   "fsspec.*",
   "gevent",
+  "great_tables",
   "hvplot.*",
+  "jax.*",
   "kuzu",
   "matplotlib.*",
   "moto.server",
@@ -99,8 +117,9 @@ module = [
   "polars.polars",
   "pyarrow.*",
   "pydantic",
-  "pyxlsb",
+  "pyiceberg.*",
   "sqlalchemy.*",
+  "torch.*",
   "xlsx2csv",
   "xlsxwriter.*",
   "zoneinfo",
@@ -206,14 +225,15 @@ addopts = [
   "--strict-markers",
   "--import-mode=importlib",
   # Default to running fast tests only. To run ALL tests, run: pytest -m ""
-  "-m not slow and not write_disk and not release and not docs and not hypothesis and not benchmark",
+  "-m not slow and not write_disk and not release and not docs and not hypothesis and not benchmark and not ci_only",
 ]
 markers = [
+  "ci_only: Tests that should only run on CI by default.",
+  "debug: Tests that should be run on a Polars debug build.",
+  "docs: Documentation code snippets",
+  "release: Tests that should be run on a Polars release build.",
   "slow: Tests with a longer than average runtime.",
   "write_disk: Tests that write to disk",
-  "debug: Tests that should be run on a Polars debug build.",
-  "release: Tests that should be run on a Polars release build.",
-  "docs: Documentation code snippets",
 ]
 filterwarnings = [
   # Fail on warnings
@@ -230,7 +250,6 @@ filterwarnings = [
   # TODO: Excel tests lead to unclosed file warnings
   # https://github.com/pola-rs/polars/issues/14466
   "ignore:unclosed file.*:ResourceWarning",
-  "ignore:the 'pyxlsb' engine is deprecated.*:DeprecationWarning",
 ]
 xfail_strict = true
 

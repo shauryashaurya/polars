@@ -1,14 +1,17 @@
 use polars::lazy::dsl;
 use polars::prelude::*;
+use polars_plan::prelude::UnionArgs;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyString};
 
+use crate::conversion::any_value::py_object_to_any_value;
 use crate::conversion::{get_lf, Wrap};
+use crate::error::PyPolarsErr;
 use crate::expr::ToExprs;
 use crate::map::lazy::binary_lambda;
 use crate::prelude::{vec_extract_wrapped, ObjectValue};
-use crate::{map, PyDataFrame, PyExpr, PyLazyFrame, PyPolarsErr, PySeries};
+use crate::{map, PyDataFrame, PyExpr, PyLazyFrame, PySeries};
 
 macro_rules! set_unwrapped_or_0 {
     ($($var:ident),+ $(,)?) => {
@@ -60,7 +63,7 @@ pub fn rolling_cov(
 pub fn arg_sort_by(
     by: Vec<PyExpr>,
     descending: Vec<bool>,
-    nulls_last: bool,
+    nulls_last: Vec<bool>,
     multithreaded: bool,
     maintain_order: bool,
 ) -> PyExpr {
@@ -85,6 +88,17 @@ pub fn arg_where(condition: PyExpr) -> PyExpr {
 pub fn as_struct(exprs: Vec<PyExpr>) -> PyExpr {
     let exprs = exprs.to_exprs();
     dsl::as_struct(exprs).into()
+}
+
+#[pyfunction]
+pub fn field(names: Vec<String>) -> PyExpr {
+    dsl::Expr::Field(
+        names
+            .into_iter()
+            .map(|name| Arc::from(name.as_str()))
+            .collect(),
+    )
+    .into()
 }
 
 #[pyfunction]
@@ -152,7 +166,7 @@ pub fn cols(names: Vec<String>) -> PyExpr {
 
 #[pyfunction]
 pub fn concat_lf(
-    seq: &PyAny,
+    seq: &Bound<'_, PyAny>,
     rechunk: bool,
     parallel: bool,
     to_supertypes: bool,
@@ -162,7 +176,7 @@ pub fn concat_lf(
 
     for res in seq.iter()? {
         let item = res?;
-        let lf = get_lf(item)?;
+        let lf = get_lf(&item)?;
         lfs.push(lf);
     }
 
@@ -172,6 +186,7 @@ pub fn concat_lf(
             rechunk,
             parallel,
             to_supertypes,
+            ..Default::default()
         },
     )
     .map_err(PyPolarsErr::from)?;
@@ -205,12 +220,6 @@ pub fn cov(a: PyExpr, b: PyExpr, ddof: u8) -> PyExpr {
 #[cfg(feature = "trigonometry")]
 pub fn arctan2(y: PyExpr, x: PyExpr) -> PyExpr {
     y.inner.arctan2(x.inner).into()
-}
-
-#[pyfunction]
-#[cfg(feature = "trigonometry")]
-pub fn arctan2d(y: PyExpr, x: PyExpr) -> PyExpr {
-    y.inner.arctan2(x.inner).degrees().into()
 }
 
 #[pyfunction]
@@ -268,7 +277,7 @@ pub fn datetime(
 
 #[pyfunction]
 pub fn concat_lf_diagonal(
-    lfs: &PyAny,
+    lfs: &Bound<'_, PyAny>,
     rechunk: bool,
     parallel: bool,
     to_supertypes: bool,
@@ -278,7 +287,7 @@ pub fn concat_lf_diagonal(
     let lfs = iter
         .map(|item| {
             let item = item?;
-            get_lf(item)
+            get_lf(&item)
         })
         .collect::<PyResult<Vec<_>>>()?;
 
@@ -288,6 +297,7 @@ pub fn concat_lf_diagonal(
             rechunk,
             parallel,
             to_supertypes,
+            ..Default::default()
         },
     )
     .map_err(PyPolarsErr::from)?;
@@ -295,13 +305,13 @@ pub fn concat_lf_diagonal(
 }
 
 #[pyfunction]
-pub fn concat_lf_horizontal(lfs: &PyAny, parallel: bool) -> PyResult<PyLazyFrame> {
+pub fn concat_lf_horizontal(lfs: &Bound<'_, PyAny>, parallel: bool) -> PyResult<PyLazyFrame> {
     let iter = lfs.iter()?;
 
     let lfs = iter
         .map(|item| {
             let item = item?;
-            get_lf(item)
+            get_lf(&item)
         })
         .collect::<PyResult<Vec<_>>>()?;
 
@@ -309,6 +319,7 @@ pub fn concat_lf_horizontal(lfs: &PyAny, parallel: bool) -> PyResult<PyLazyFrame
         rechunk: false, // No need to rechunk with horizontal concatenation
         parallel,
         to_supertypes: false,
+        ..Default::default()
     };
     let lf = dsl::functions::concat_lf_horizontal(lfs, args).map_err(PyPolarsErr::from)?;
     Ok(lf.into())
@@ -325,6 +336,16 @@ pub fn concat_expr(e: Vec<PyExpr>, rechunk: bool) -> PyResult<PyExpr> {
 pub fn dtype_cols(dtypes: Vec<Wrap<DataType>>) -> PyResult<PyExpr> {
     let dtypes = vec_extract_wrapped(dtypes);
     Ok(dsl::dtype_cols(dtypes).into())
+}
+
+#[pyfunction]
+pub fn index_cols(indices: Vec<i64>) -> PyExpr {
+    if indices.len() == 1 {
+        dsl::nth(indices[0])
+    } else {
+        dsl::index_cols(indices)
+    }
+    .into()
 }
 
 #[pyfunction]
@@ -383,7 +404,12 @@ pub fn last() -> PyExpr {
 }
 
 #[pyfunction]
-pub fn lit(value: &PyAny, allow_object: bool) -> PyResult<PyExpr> {
+pub fn nth(n: i64) -> PyExpr {
+    dsl::nth(n).into()
+}
+
+#[pyfunction]
+pub fn lit(value: &Bound<'_, PyAny>, allow_object: bool) -> PyResult<PyExpr> {
     if value.is_instance_of::<PyBool>() {
         let val = value.extract::<bool>().unwrap();
         Ok(dsl::lit(val).into())
@@ -397,18 +423,16 @@ pub fn lit(value: &PyAny, allow_object: bool) -> PyResult<PyExpr> {
         let val = float.extract::<f64>().unwrap();
         Ok(Expr::Literal(LiteralValue::Float(val)).into())
     } else if let Ok(pystr) = value.downcast::<PyString>() {
-        Ok(dsl::lit(
-            pystr
-                .to_str()
-                .expect("could not transform Python string to Rust Unicode"),
-        )
-        .into())
+        Ok(dsl::lit(pystr.to_string()).into())
     } else if let Ok(series) = value.extract::<PySeries>() {
         Ok(dsl::lit(series.series).into())
     } else if value.is_none() {
         Ok(dsl::lit(Null {}).into())
     } else if let Ok(value) = value.downcast::<PyBytes>() {
         Ok(dsl::lit(value.as_bytes()).into())
+    } else if value.get_type().qualname().unwrap() == "Decimal" {
+        let av = py_object_to_any_value(value, true)?;
+        Ok(Expr::Literal(LiteralValue::try_from(av).unwrap()).into())
     } else if allow_object {
         let s = Python::with_gil(|py| {
             PySeries::new_object(py, "", vec![ObjectValue::from(value.into_py(py))], false).series

@@ -1,8 +1,8 @@
 use polars_core::prelude::{IdxSize, UniqueKeepStrategy};
 use polars_ops::prelude::JoinType;
-use polars_plan::logical_plan::IR;
+use polars_plan::plans::IR;
 use polars_plan::prelude::{FileCount, FileScan, FileScanOptions, FunctionNode};
-use pyo3::exceptions::PyNotImplementedError;
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 
 use super::super::visit::PyExprIR;
@@ -71,7 +71,7 @@ impl PyFileOptions {
             .inner
             .row_index
             .as_ref()
-            .map_or_else(|| py.None(), |n| (&n.name, n.offset).to_object(py)))
+            .map_or_else(|| py.None(), |n| (n.name.as_ref(), n.offset).to_object(py)))
     }
     #[getter]
     fn rechunk(&self, _py: Python<'_>) -> PyResult<bool> {
@@ -118,8 +118,6 @@ pub struct DataFrameScan {
 pub struct SimpleProjection {
     #[pyo3(get)]
     input: usize,
-    #[pyo3(get)]
-    duplicate_check: bool,
 }
 
 #[pyclass]
@@ -130,9 +128,7 @@ pub struct Select {
     #[pyo3(get)]
     expr: Vec<PyExprIR>,
     #[pyo3(get)]
-    cse_expr: Vec<PyExprIR>,
-    #[pyo3(get)]
-    options: (), //ProjectionOptions,
+    should_broadcast: bool,
 }
 
 #[pyclass]
@@ -143,7 +139,7 @@ pub struct Sort {
     #[pyo3(get)]
     by_column: Vec<PyExprIR>,
     #[pyo3(get)]
-    sort_options: (Vec<bool>, bool, bool),
+    sort_options: (bool, Vec<bool>, Vec<bool>),
     #[pyo3(get)]
     slice: Option<(i64, usize)>,
 }
@@ -199,9 +195,16 @@ pub struct HStack {
     #[pyo3(get)]
     exprs: Vec<PyExprIR>,
     #[pyo3(get)]
-    cse_exprs: Vec<PyExprIR>,
+    should_broadcast: bool,
+}
+
+#[pyclass]
+/// Like Select, but all operations produce a single row.
+pub struct Reduce {
     #[pyo3(get)]
-    options: (), // ProjectionOptions,
+    input: usize,
+    #[pyo3(get)]
+    exprs: Vec<PyExprIR>,
 }
 
 #[pyclass]
@@ -289,8 +292,17 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
         }
         .into_py(py),
         IR::Scan {
+            hive_parts: Some(_),
+            ..
+        } => {
+            return Err(PyNotImplementedError::new_err(
+                "scan with hive partitioning",
+            ))
+        },
+        IR::Scan {
             paths,
             file_info: _,
+            hive_parts: _,
             predicate,
             output_schema: _,
             scan_type,
@@ -304,10 +316,35 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
                 inner: file_options.clone(),
             },
             scan_type: match scan_type {
-                // TODO: Actually send options through since those are important for correct reads
-                FileScan::Csv { .. } => "csv".into_py(py),
-                FileScan::Parquet { .. } => "parquet".into_py(py),
+                FileScan::Csv {
+                    options,
+                    cloud_options,
+                } => {
+                    // Since these options structs are serializable,
+                    // we just use the serde json representation
+                    let options = serde_json::to_string(options)
+                        .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
+                    let cloud_options = serde_json::to_string(cloud_options)
+                        .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
+                    ("csv", options, cloud_options).into_py(py)
+                },
+                FileScan::Parquet {
+                    options,
+                    cloud_options,
+                    ..
+                } => {
+                    let options = serde_json::to_string(options)
+                        .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
+                    let cloud_options = serde_json::to_string(cloud_options)
+                        .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
+                    ("parquet", options, cloud_options).into_py(py)
+                },
                 FileScan::Ipc { .. } => return Err(PyNotImplementedError::new_err("ipc scan")),
+                FileScan::NDJson { options } => {
+                    let options = serde_json::to_string(options)
+                        .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
+                    ("ndjson", options).into_py(py)
+                },
                 FileScan::Anonymous { .. } => {
                     return Err(PyNotImplementedError::new_err("anonymous scan"))
                 },
@@ -317,36 +354,34 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
         IR::DataFrameScan {
             df,
             schema: _,
-            output_schema: _,
-            projection,
-            selection,
+            output_schema,
+            filter: selection,
         } => DataFrameScan {
             df: PyDataFrame::new((**df).clone()),
-            projection: projection
-                .as_ref()
-                .map_or_else(|| py.None(), |f| f.to_object(py)),
+            projection: output_schema.as_ref().map_or_else(
+                || py.None(),
+                |s| {
+                    s.iter_names()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .to_object(py)
+                },
+            ),
             selection: selection.as_ref().map(|e| e.into()),
         }
         .into_py(py),
-        IR::SimpleProjection {
-            input,
-            columns: _,
-            duplicate_check,
-        } => SimpleProjection {
-            input: input.0,
-            duplicate_check: *duplicate_check,
-        }
-        .into_py(py),
+        IR::SimpleProjection { input, columns: _ } => {
+            SimpleProjection { input: input.0 }.into_py(py)
+        },
         IR::Select {
             input,
             expr,
             schema: _,
-            options: _,
+            options,
         } => Select {
-            expr: expr.default_exprs().iter().map(|e| e.into()).collect(),
-            cse_expr: expr.cse_exprs().iter().map(|e| e.into()).collect(),
+            expr: expr.iter().map(|e| e.into()).collect(),
             input: input.0,
-            options: (),
+            should_broadcast: options.should_broadcast,
         }
         .into_py(py),
         IR::Sort {
@@ -358,9 +393,9 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
             input: input.0,
             by_column: by_column.iter().map(|e| e.into()).collect(),
             sort_options: (
-                sort_options.descending.clone(),
-                sort_options.nulls_last,
                 sort_options.maintain_order,
+                sort_options.nulls_last.clone(),
+                sort_options.descending.clone(),
             ),
             slice: *slice,
         }
@@ -414,7 +449,7 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
                 match options.args.how {
                     JoinType::Left => "left",
                     JoinType::Inner => "inner",
-                    JoinType::Outer => "outer",
+                    JoinType::Full => "full",
                     JoinType::AsOf(_) => return Err(PyNotImplementedError::new_err("asof join")),
                     JoinType::Cross => "cross",
                     JoinType::Semi => "leftsemi",
@@ -432,17 +467,24 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
             input,
             exprs,
             schema: _,
-            options: _,
+            options,
         } => HStack {
             input: input.0,
-            exprs: exprs.default_exprs().iter().map(|e| e.into()).collect(),
-            cse_exprs: exprs.cse_exprs().iter().map(|e| e.into()).collect(),
-            options: (),
+            exprs: exprs.iter().map(|e| e.into()).collect(),
+            should_broadcast: options.should_broadcast,
+        }
+        .into_py(py),
+        IR::Reduce {
+            input,
+            exprs,
+            schema: _,
+        } => Reduce {
+            input: input.0,
+            exprs: exprs.iter().map(|e| e.into()).collect(),
         }
         .into_py(py),
         IR::Distinct { input, options } => Distinct {
             input: input.0,
-            // TODO, rest of options
             options: (
                 match options.keep_strategy {
                     UniqueKeepStrategy::First => "first",
@@ -510,13 +552,10 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
                     columns.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                 )
                     .to_object(py),
-                FunctionNode::Melt { args, schema: _ } => (
-                    "melt",
-                    args.id_vars.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    args.value_vars
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>(),
+                FunctionNode::Unpivot { args, schema: _ } => (
+                    "unpivot",
+                    args.index.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    args.on.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     args.variable_name
                         .as_ref()
                         .map_or_else(|| py.None(), |s| s.as_str().to_object(py)),

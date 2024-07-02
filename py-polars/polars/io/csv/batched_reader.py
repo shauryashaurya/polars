@@ -8,7 +8,7 @@ from polars._utils.various import (
     normalize_filepath,
 )
 from polars._utils.wrap import wrap_df
-from polars.datatypes import N_INFER_DEFAULT, py_type_to_dtype
+from polars.datatypes import N_INFER_DEFAULT, parse_into_dtype
 from polars.io._utils import parse_columns_arg, parse_row_index_args
 from polars.io.csv._utils import _update_columns
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from polars import DataFrame
-    from polars.type_aliases import CsvEncoding, PolarsDataType, SchemaDict
+    from polars._typing import CsvEncoding, PolarsDataType, SchemaDict
 
 
 class BatchedCsvReader:
@@ -35,7 +35,7 @@ class BatchedCsvReader:
         comment_prefix: str | None = None,
         quote_char: str | None = '"',
         skip_rows: int = 0,
-        dtypes: None | (SchemaDict | Sequence[PolarsDataType]) = None,
+        schema_overrides: SchemaDict | Sequence[PolarsDataType] | None = None,
         null_values: str | Sequence[str] | dict[str, str] | None = None,
         missing_utf8_is_empty_string: bool = False,
         ignore_errors: bool = False,
@@ -57,19 +57,19 @@ class BatchedCsvReader:
         truncate_ragged_lines: bool = False,
         decimal_comma: bool = False,
     ):
-        path = normalize_filepath(source)
+        path = normalize_filepath(source, check_not_directory=False)
 
         dtype_list: Sequence[tuple[str, PolarsDataType]] | None = None
         dtype_slice: Sequence[PolarsDataType] | None = None
-        if dtypes is not None:
-            if isinstance(dtypes, dict):
+        if schema_overrides is not None:
+            if isinstance(schema_overrides, dict):
                 dtype_list = []
-                for k, v in dtypes.items():
-                    dtype_list.append((k, py_type_to_dtype(v)))
-            elif isinstance(dtypes, Sequence):
-                dtype_slice = dtypes
+                for k, v in schema_overrides.items():
+                    dtype_list.append((k, parse_into_dtype(v)))
+            elif isinstance(schema_overrides, Sequence):
+                dtype_slice = schema_overrides
             else:
-                msg = "`dtypes` arg should be list or dict"
+                msg = "`schema_overrides` arg should be list or dict"
                 raise TypeError(msg)
 
         processed_null_values = _process_null_values(null_values)

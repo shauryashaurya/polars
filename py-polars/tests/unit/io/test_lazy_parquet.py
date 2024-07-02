@@ -12,7 +12,7 @@ import polars as pl
 from polars.testing import assert_frame_equal
 
 if TYPE_CHECKING:
-    from polars.type_aliases import ParallelStrategy
+    from polars._typing import ParallelStrategy
 
 
 @pytest.fixture()
@@ -57,6 +57,11 @@ def test_row_index(foods_parquet_path: Path) -> None:
     )
 
     assert df["foo"].to_list() == [10, 16, 21, 23, 24, 30, 35]
+
+
+def test_row_index_len_16543(foods_parquet_path: Path) -> None:
+    q = pl.scan_parquet(foods_parquet_path).with_row_index()
+    assert q.select(pl.all()).select(pl.len()).collect().item() == 27
 
 
 @pytest.mark.write_disk()
@@ -251,7 +256,7 @@ def test_parquet_statistics(monkeypatch: Any, capfd: Any, tmp_path: Path) -> Non
     assert df.n_chunks("all") == [4, 4]
 
     file_path = tmp_path / "stats.parquet"
-    df.write_parquet(file_path, statistics=True, use_pyarrow=False)
+    df.write_parquet(file_path, statistics=True, use_pyarrow=False, row_group_size=50)
 
     for pred in [
         pl.col("idx") < 50,
@@ -387,7 +392,8 @@ def test_io_struct_async_12500(tmp_path: Path) -> None:
 
 
 @pytest.mark.write_disk()
-def test_parquet_different_schema(tmp_path: Path) -> None:
+@pytest.mark.parametrize("streaming", [True, False])
+def test_parquet_different_schema(tmp_path: Path, streaming: bool) -> None:
     # Schema is different but the projected columns are same dtype.
     f1 = tmp_path / "a.parquet"
     f2 = tmp_path / "b.parquet"
@@ -397,7 +403,9 @@ def test_parquet_different_schema(tmp_path: Path) -> None:
 
     a.write_parquet(f1)
     b.write_parquet(f2)
-    assert pl.scan_parquet([f1, f2]).select("b").collect().columns == ["b"]
+    assert pl.scan_parquet([f1, f2]).select("b").collect(
+        streaming=streaming
+    ).columns == ["b"]
 
 
 @pytest.mark.write_disk()
@@ -432,3 +440,13 @@ def test_scan_deadlock_rayon_spawn_from_async_15172(
     t.join(5)
 
     assert results[0].equals(df)
+
+
+@pytest.mark.write_disk()
+@pytest.mark.parametrize("streaming", [True, False])
+def test_parquet_schema_mismatch_panic_17067(tmp_path: Path, streaming: bool) -> None:
+    pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).write_parquet(tmp_path / "1.parquet")
+    pl.DataFrame({"c": [1, 2, 3], "d": [4, 5, 6]}).write_parquet(tmp_path / "2.parquet")
+
+    with pytest.raises(pl.exceptions.SchemaError):
+        pl.scan_parquet(tmp_path).collect(streaming=streaming)

@@ -4,10 +4,9 @@ import contextlib
 from typing import TYPE_CHECKING, Iterable, overload
 
 from polars import functions as F
-from polars._utils.deprecation import rename_use_earliest_to_ambiguous
-from polars._utils.parse_expr_input import (
-    parse_as_expression,
-    parse_as_list_of_expressions,
+from polars._utils.parse import (
+    parse_into_expression,
+    parse_into_list_of_expressions,
 )
 from polars._utils.wrap import wrap_expr
 from polars.datatypes import Date, Struct, Time
@@ -20,7 +19,7 @@ if TYPE_CHECKING:
     from typing import Literal
 
     from polars import Expr, Series
-    from polars.type_aliases import Ambiguous, IntoExpr, SchemaDict, TimeUnit
+    from polars._typing import Ambiguous, IntoExpr, SchemaDict, TimeUnit
 
 
 def datetime_(
@@ -34,7 +33,6 @@ def datetime_(
     *,
     time_unit: TimeUnit = "us",
     time_zone: str | None = None,
-    use_earliest: bool | None = None,
     ambiguous: Ambiguous | Expr = "raise",
 ) -> Expr:
     """
@@ -60,15 +58,6 @@ def datetime_(
         Time unit of the resulting expression.
     time_zone
         Time zone of the resulting expression.
-    use_earliest
-        Determine how to deal with ambiguous datetimes:
-
-        - `None` (default): raise
-        - `True`: use the earliest datetime
-        - `False`: use the latest datetime
-
-        .. deprecated:: 0.19.0
-            Use `ambiguous` instead
     ambiguous
         Determine how to deal with ambiguous datetimes:
 
@@ -92,7 +81,6 @@ def datetime_(
     ...         "minute": [15, 30, 45],
     ...     }
     ... )
-
     >>> df.with_columns(
     ...     pl.datetime(
     ...         2024,
@@ -113,22 +101,48 @@ def datetime_(
     │ 2     ┆ 5   ┆ 13   ┆ 30     ┆ 2024-02-05 13:30:00 AEDT       │
     │ 3     ┆ 6   ┆ 14   ┆ 45     ┆ 2024-03-06 14:45:00 AEDT       │
     └───────┴─────┴──────┴────────┴────────────────────────────────┘
+
+    We can also use `pl.datetime` for filtering:
+
+    >>> from datetime import datetime
+    >>> df = pl.DataFrame(
+    ...     {
+    ...         "start": [
+    ...             datetime(2024, 1, 1, 0, 0, 0),
+    ...             datetime(2024, 1, 1, 0, 0, 0),
+    ...             datetime(2024, 1, 1, 0, 0, 0),
+    ...         ],
+    ...         "end": [
+    ...             datetime(2024, 5, 1, 20, 15, 10),
+    ...             datetime(2024, 7, 1, 21, 25, 20),
+    ...             datetime(2024, 9, 1, 22, 35, 30),
+    ...         ],
+    ...     }
+    ... )
+    >>> df.filter(pl.col("end") > pl.datetime(2024, 6, 1))
+        shape: (2, 2)
+    ┌─────────────────────┬─────────────────────┐
+    │ start               ┆ end                 │
+    │ ---                 ┆ ---                 │
+    │ datetime[μs]        ┆ datetime[μs]        │
+    ╞═════════════════════╪═════════════════════╡
+    │ 2024-01-01 00:00:00 ┆ 2024-07-01 21:25:20 │
+    │ 2024-01-01 00:00:00 ┆ 2024-09-01 22:35:30 │
+    └─────────────────────┴─────────────────────┘
     """
-    ambiguous = parse_as_expression(
-        rename_use_earliest_to_ambiguous(use_earliest, ambiguous), str_as_lit=True
-    )
-    year_expr = parse_as_expression(year)
-    month_expr = parse_as_expression(month)
-    day_expr = parse_as_expression(day)
+    ambiguous_expr = parse_into_expression(ambiguous, str_as_lit=True)
+    year_expr = parse_into_expression(year)
+    month_expr = parse_into_expression(month)
+    day_expr = parse_into_expression(day)
 
     if hour is not None:
-        hour = parse_as_expression(hour)
+        hour = parse_into_expression(hour)
     if minute is not None:
-        minute = parse_as_expression(minute)
+        minute = parse_into_expression(minute)
     if second is not None:
-        second = parse_as_expression(second)
+        second = parse_into_expression(second)
     if microsecond is not None:
-        microsecond = parse_as_expression(microsecond)
+        microsecond = parse_into_expression(microsecond)
 
     return wrap_expr(
         plr.datetime(
@@ -141,7 +155,7 @@ def datetime_(
             microsecond,
             time_unit,
             time_zone,
-            ambiguous,
+            ambiguous_expr,
         )
     )
 
@@ -176,7 +190,6 @@ def date_(
     ...         "day": [4, 5, 6],
     ...     }
     ... )
-
     >>> df.with_columns(pl.date(2024, pl.col("month"), pl.col("day")))
     shape: (3, 3)
     ┌───────┬─────┬────────────┐
@@ -188,6 +201,26 @@ def date_(
     │ 2     ┆ 5   ┆ 2024-02-05 │
     │ 3     ┆ 6   ┆ 2024-03-06 │
     └───────┴─────┴────────────┘
+
+    We can also use `pl.date` for filtering:
+
+    >>> from datetime import date
+    >>> df = pl.DataFrame(
+    ...     {
+    ...         "start": [date(2024, 1, 1), date(2024, 1, 1), date(2024, 1, 1)],
+    ...         "end": [date(2024, 5, 1), date(2024, 7, 1), date(2024, 9, 1)],
+    ...     }
+    ... )
+    >>> df.filter(pl.col("end") > pl.date(2024, 6, 1))
+    shape: (2, 2)
+    ┌────────────┬────────────┐
+    │ start      ┆ end        │
+    │ ---        ┆ ---        │
+    │ date       ┆ date       │
+    ╞════════════╪════════════╡
+    │ 2024-01-01 ┆ 2024-07-01 │
+    │ 2024-01-01 ┆ 2024-09-01 │
+    └────────────┴────────────┘
     """
     return datetime_(year, month, day).cast(Date).alias("date")
 
@@ -360,21 +393,21 @@ def duration(
     └─────────────────────┴─────────────────────┴─────────────────────┘
     """  # noqa: W505
     if weeks is not None:
-        weeks = parse_as_expression(weeks)
+        weeks = parse_into_expression(weeks)
     if days is not None:
-        days = parse_as_expression(days)
+        days = parse_into_expression(days)
     if hours is not None:
-        hours = parse_as_expression(hours)
+        hours = parse_into_expression(hours)
     if minutes is not None:
-        minutes = parse_as_expression(minutes)
+        minutes = parse_into_expression(minutes)
     if seconds is not None:
-        seconds = parse_as_expression(seconds)
+        seconds = parse_into_expression(seconds)
     if milliseconds is not None:
-        milliseconds = parse_as_expression(milliseconds)
+        milliseconds = parse_into_expression(milliseconds)
     if microseconds is not None:
-        microseconds = parse_as_expression(microseconds)
+        microseconds = parse_into_expression(microseconds)
     if nanoseconds is not None:
-        nanoseconds = parse_as_expression(nanoseconds)
+        nanoseconds = parse_into_expression(nanoseconds)
         if time_unit is None:
             time_unit = "ns"
 
@@ -414,6 +447,36 @@ def concat_list(exprs: IntoExpr | Iterable[IntoExpr], *more_exprs: IntoExpr) -> 
 
     Examples
     --------
+    Concatenate two existing list columns. Null values are propagated.
+
+    >>> df = pl.DataFrame({"a": [[1, 2], [3], [4, 5]], "b": [[4], [], None]})
+    >>> df.with_columns(concat_list=pl.concat_list("a", "b"))
+    shape: (3, 3)
+    ┌───────────┬───────────┬─────────────┐
+    │ a         ┆ b         ┆ concat_list │
+    │ ---       ┆ ---       ┆ ---         │
+    │ list[i64] ┆ list[i64] ┆ list[i64]   │
+    ╞═══════════╪═══════════╪═════════════╡
+    │ [1, 2]    ┆ [4]       ┆ [1, 2, 4]   │
+    │ [3]       ┆ []        ┆ [3]         │
+    │ [4, 5]    ┆ null      ┆ null        │
+    └───────────┴───────────┴─────────────┘
+
+    Non-list columns are cast to a list before concatenation. The output data type
+    is the supertype of the concatenated columns.
+
+    >>> df.select("a", concat_list=pl.concat_list("a", pl.lit("x")))
+    shape: (3, 2)
+    ┌───────────┬─────────────────┐
+    │ a         ┆ concat_list     │
+    │ ---       ┆ ---             │
+    │ list[i64] ┆ list[str]       │
+    ╞═══════════╪═════════════════╡
+    │ [1, 2]    ┆ ["1", "2", "x"] │
+    │ [3]       ┆ ["3", "x"]      │
+    │ [4, 5]    ┆ ["4", "5", "x"] │
+    └───────────┴─────────────────┘
+
     Create lagged columns and collect them into a list. This mimics a rolling window.
 
     >>> df = pl.DataFrame({"A": [1.0, 2.0, 9.0, 2.0, 13.0]})
@@ -434,7 +497,7 @@ def concat_list(exprs: IntoExpr | Iterable[IntoExpr], *more_exprs: IntoExpr) -> 
     │ [9.0, 2.0, 13.0]  │
     └───────────────────┘
     """
-    exprs = parse_as_list_of_expressions(exprs, *more_exprs)
+    exprs = parse_into_list_of_expressions(exprs, *more_exprs)
     return wrap_expr(plr.concat_list(exprs))
 
 
@@ -530,16 +593,16 @@ def struct(
     Use keyword arguments to easily name each struct field.
 
     >>> df.select(pl.struct(p="int", q="bool").alias("my_struct")).schema
-    OrderedDict({'my_struct': Struct({'p': Int64, 'q': Boolean})})
+    Schema({'my_struct': Struct({'p': Int64, 'q': Boolean})})
     """
-    pyexprs = parse_as_list_of_expressions(*exprs, **named_exprs)
+    pyexprs = parse_into_list_of_expressions(*exprs, **named_exprs)
     expr = wrap_expr(plr.as_struct(pyexprs))
 
     if schema:
         if not exprs:
             # no columns or expressions provided; create one from schema keys
             expr = wrap_expr(
-                plr.as_struct(parse_as_list_of_expressions(list(schema.keys())))
+                plr.as_struct(parse_into_list_of_expressions(list(schema.keys())))
             )
         expr = expr.cast(Struct(schema), strict=False)
 
@@ -572,10 +635,10 @@ def concat_str(
     separator
         String that will be used to separate the values of each column.
     ignore_nulls
-        Ignore null values (default).
+        Ignore null values (default is ``False``).
 
         If set to ``False``, null values will be propagated.
-        if the row contains any null values, the output is ``None``.
+        if the row contains any null values, the output is null.
 
     Examples
     --------
@@ -607,7 +670,7 @@ def concat_str(
     │ 3   ┆ null ┆ walk ┆ null          │
     └─────┴──────┴──────┴───────────────┘
     """
-    exprs = parse_as_list_of_expressions(exprs, *more_exprs)
+    exprs = parse_into_list_of_expressions(exprs, *more_exprs)
     return wrap_expr(plr.concat_str(exprs, separator, ignore_nulls))
 
 
@@ -656,7 +719,7 @@ def format(f_string: str, *args: Expr | str) -> Expr:
     arguments = iter(args)
     for i, s in enumerate(f_string.split("{}")):
         if i > 0:
-            e = wrap_expr(parse_as_expression(next(arguments)))
+            e = wrap_expr(parse_into_expression(next(arguments)))
             exprs.append(e)
 
         if len(s) > 0:

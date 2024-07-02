@@ -7,12 +7,13 @@ import numpy as np
 import pytest
 
 import polars as pl
+from polars.exceptions import InvalidOperationError
 from polars.testing import assert_frame_equal
 
 if TYPE_CHECKING:
     import numpy.typing as npt
 
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 def test_quantile_expr_input() -> None:
@@ -34,8 +35,8 @@ def test_boolean_aggs() -> None:
     ]
     assert df.select(aggs).to_dict(as_series=False) == {
         "mean": [0.6666666666666666],
-        "std": [0.5773502588272095],
-        "var": [0.3333333432674408],
+        "std": [0.5773502691896258],
+        "var": [0.33333333333333337],
     }
 
     assert df.group_by(pl.lit(1)).agg(aggs).to_dict(as_series=False) == {
@@ -247,7 +248,7 @@ def test_err_on_implode_and_agg() -> None:
 
     # this would OOB
     with pytest.raises(
-        pl.InvalidOperationError,
+        InvalidOperationError,
         match=r"'implode' followed by an aggregation is not allowed",
     ):
         df.group_by("type").agg(pl.col("type").implode().first().alias("foo"))
@@ -262,7 +263,7 @@ def test_err_on_implode_and_agg() -> None:
 
     # but not during a window function as the groups cannot be mapped back
     with pytest.raises(
-        pl.InvalidOperationError,
+        InvalidOperationError,
         match=r"'implode' followed by an aggregation is not allowed",
     ):
         df.lazy().select(pl.col("type").implode().list.head(1).over("type")).collect()
@@ -295,7 +296,7 @@ def test_sum_empty_and_null_set() -> None:
 
 def test_horizontal_sum_null_to_identity() -> None:
     assert pl.DataFrame({"a": [1, 5], "b": [10, None]}).select(
-        [pl.sum_horizontal(["a", "b"])]
+        pl.sum_horizontal(["a", "b"])
     ).to_series().to_list() == [11, 5]
 
 
@@ -304,7 +305,7 @@ def test_horizontal_sum_bool_dtype() -> None:
     assert_frame_equal(out, pl.DataFrame({"a": pl.Series([1, 0], dtype=pl.UInt32)}))
 
 
-def test_horizontal_sum_in_groupby_15102() -> None:
+def test_horizontal_sum_in_group_by_15102() -> None:
     nbr_records = 1000
     out = (
         pl.LazyFrame(
@@ -380,6 +381,7 @@ def test_nan_inf_aggregation() -> None:
             ("inf and null", None),
         ],
         schema=["group", "value"],
+        orient="row",
     )
 
     assert_frame_equal(
@@ -398,12 +400,13 @@ def test_nan_inf_aggregation() -> None:
                 ("inf and null", np.inf, np.inf, np.inf),
             ],
             schema=["group", "min", "max", "mean"],
+            orient="row",
         ),
     )
 
 
 @pytest.mark.parametrize("dtype", [pl.Int16, pl.UInt16])
-def test_int16_max_12904(dtype: pl.PolarsDataType) -> None:
+def test_int16_max_12904(dtype: PolarsDataType) -> None:
     s = pl.Series([None, 1], dtype=dtype)
 
     assert s.min() == 1
@@ -496,15 +499,15 @@ def test_horizontal_mean_single_column(
     out_dtype: PolarsDataType,
 ) -> None:
     out = (
-        pl.LazyFrame({"a": pl.Series([1, 0], dtype=in_dtype)})
+        pl.LazyFrame({"a": pl.Series([1, 0]).cast(in_dtype)})
         .select(pl.mean_horizontal(pl.all()))
         .collect()
     )
 
-    assert_frame_equal(out, pl.DataFrame({"a": pl.Series([1.0, 0.0], dtype=out_dtype)}))
+    assert_frame_equal(out, pl.DataFrame({"a": pl.Series([1.0, 0.0]).cast(out_dtype)}))
 
 
-def test_horizontal_mean_in_groupby_15115() -> None:
+def test_horizontal_mean_in_group_by_15115() -> None:
     nbr_records = 1000
     out = (
         pl.LazyFrame(
@@ -566,7 +569,7 @@ def test_min_max_2850() -> None:
     for _ in range(10):
         permuted = df.sample(fraction=1.0, seed=0)
         computed = permuted.select(
-            [pl.col("id").min().alias("min"), pl.col("id").max().alias("max")]
+            pl.col("id").min().alias("min"), pl.col("id").max().alias("max")
         )
         assert cast(int, computed[0, "min"]) == minimum
         assert cast(float, computed[0, "max"]) == maximum
@@ -594,3 +597,154 @@ def test_multi_arg_structify_15834() -> None:
             {"a": 1, "value": 0.5896839894245691},
         ],
     }
+
+
+def test_filter_aggregation_16642() -> None:
+    df = pl.DataFrame(
+        {
+            "datetime": [
+                datetime(2022, 1, 1, 11, 0),
+                datetime(2022, 1, 1, 11, 1),
+                datetime(2022, 1, 1, 11, 2),
+                datetime(2022, 1, 1, 11, 3),
+                datetime(2022, 1, 1, 11, 4),
+                datetime(2022, 1, 1, 11, 5),
+                datetime(2022, 1, 1, 11, 6),
+                datetime(2022, 1, 1, 11, 7),
+                datetime(2022, 1, 1, 11, 8),
+                datetime(2022, 1, 1, 11, 9, 1),
+                datetime(2022, 1, 2, 11, 0),
+                datetime(2022, 1, 2, 11, 1),
+                datetime(2022, 1, 2, 11, 2),
+                datetime(2022, 1, 2, 11, 3),
+                datetime(2022, 1, 2, 11, 4),
+                datetime(2022, 1, 2, 11, 5),
+                datetime(2022, 1, 2, 11, 6),
+                datetime(2022, 1, 2, 11, 7),
+                datetime(2022, 1, 2, 11, 8),
+                datetime(2022, 1, 2, 11, 9, 1),
+            ],
+            "alpha": [
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "F",
+                "G",
+                "H",
+                "I",
+                "J",
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "F",
+                "G",
+                "H",
+                "I",
+                "J",
+            ],
+            "num": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        }
+    )
+    grouped = df.group_by(pl.col("datetime").dt.date())
+
+    ts_filter = pl.col("datetime").dt.time() <= pl.time(11, 3)
+
+    report = grouped.agg(pl.col("num").filter(ts_filter).max()).sort("datetime")
+    assert report.to_dict(as_series=False) == {
+        "datetime": [date(2022, 1, 1), date(2022, 1, 2)],
+        "num": [3, 3],
+    }
+
+
+def test_sort_by_over_single_nulls_first() -> None:
+    key = [0, 0, 0, 0, 1, 1, 1, 1]
+    df = pl.DataFrame(
+        {
+            "key": key,
+            "value": [2, None, 1, 0, 2, None, 1, 0],
+        }
+    )
+    out = df.select(
+        pl.all().sort_by("value", nulls_last=False, maintain_order=True).over("key")
+    )
+    expected = pl.DataFrame(
+        {
+            "key": key,
+            "value": [None, 0, 1, 2, None, 0, 1, 2],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
+def test_sort_by_over_single_nulls_last() -> None:
+    key = [0, 0, 0, 0, 1, 1, 1, 1]
+    df = pl.DataFrame(
+        {
+            "key": key,
+            "value": [2, None, 1, 0, 2, None, 1, 0],
+        }
+    )
+    out = df.select(
+        pl.all().sort_by("value", nulls_last=True, maintain_order=True).over("key")
+    )
+    expected = pl.DataFrame(
+        {
+            "key": key,
+            "value": [0, 1, 2, None, 0, 1, 2, None],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
+def test_sort_by_over_multiple_nulls_first() -> None:
+    key1 = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+    key2 = [0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1]
+    df = pl.DataFrame(
+        {
+            "key1": key1,
+            "key2": key2,
+            "value": [1, None, 0, 1, None, 0, 1, None, 0, None, 1, 0],
+        }
+    )
+    out = df.select(
+        pl.all()
+        .sort_by("value", nulls_last=False, maintain_order=True)
+        .over("key1", "key2")
+    )
+    expected = pl.DataFrame(
+        {
+            "key1": key1,
+            "key2": key2,
+            "value": [None, 0, 1, None, 0, 1, None, 0, 1, None, 0, 1],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
+def test_sort_by_over_multiple_nulls_last() -> None:
+    key1 = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+    key2 = [0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1]
+    df = pl.DataFrame(
+        {
+            "key1": key1,
+            "key2": key2,
+            "value": [1, None, 0, 1, None, 0, 1, None, 0, None, 1, 0],
+        }
+    )
+    out = df.select(
+        pl.all()
+        .sort_by("value", nulls_last=True, maintain_order=True)
+        .over("key1", "key2")
+    )
+    expected = pl.DataFrame(
+        {
+            "key1": key1,
+            "key2": key2,
+            "value": [0, 1, None, 0, 1, None, 0, 1, None, 0, 1, None],
+        }
+    )
+    assert_frame_equal(out, expected)

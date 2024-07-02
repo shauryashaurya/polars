@@ -7,15 +7,28 @@ use super::*;
 /// Returns a [`PolarsError::ComputeError`] if no such data type exists.
 pub fn try_get_supertype(l: &DataType, r: &DataType) -> PolarsResult<DataType> {
     get_supertype(l, r).ok_or_else(
-        || polars_err!(ComputeError: "failed to determine supertype of {} and {}", l, r),
+        || polars_err!(SchemaMismatch: "failed to determine supertype of {} and {}", l, r),
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
+pub struct SuperTypeOptions {
+    pub implode_list: bool,
+}
+
+pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
+    get_supertype_with_options(l, r, SuperTypeOptions::default())
 }
 
 /// Given two data types, determine the data type that both types can safely be cast to.
 ///
 /// Returns [`None`] if no such data type exists.
-pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
-    fn inner(l: &DataType, r: &DataType) -> Option<DataType> {
+pub fn get_supertype_with_options(
+    l: &DataType,
+    r: &DataType,
+    options: SuperTypeOptions,
+) -> Option<DataType> {
+    fn inner(l: &DataType, r: &DataType, options: SuperTypeOptions) -> Option<DataType> {
         use DataType::*;
         if l == r {
             return Some(l.clone());
@@ -168,7 +181,7 @@ pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
             (Datetime(_, _), Float32) => Some(Float64),
             #[cfg(feature = "dtype-datetime")]
             (Datetime(_, _), Float64) => Some(Float64),
-            #[cfg(all(feature = "dtype-datetime", feature = "dtype=date"))]
+            #[cfg(all(feature = "dtype-datetime", feature = "dtype-date"))]
             (Datetime(tu, tz), Date) => Some(Datetime(*tu, tz.clone())),
 
             (Boolean, Float32) => Some(Float32),
@@ -233,27 +246,26 @@ pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
             }
             (List(inner_left), List(inner_right)) => {
                 let st = get_supertype(inner_left, inner_right)?;
-                Some(DataType::List(Box::new(st)))
+                Some(List(Box::new(st)))
             }
             #[cfg(feature = "dtype-array")]
             (List(inner_left), Array(inner_right, _)) | (Array(inner_left, _), List(inner_right)) => {
                 let st = get_supertype(inner_left, inner_right)?;
-                Some(DataType::List(Box::new(st)))
-            }
-            // todo! check if can be removed
-            (List(inner), other) | (other, List(inner)) => {
-                let st = get_supertype(inner, other)?;
-                Some(DataType::List(Box::new(st)))
+                Some(List(Box::new(st)))
             }
             #[cfg(feature = "dtype-array")]
             (Array(inner_left, width_left), Array(inner_right, width_right)) if *width_left == *width_right => {
                 let st = get_supertype(inner_left, inner_right)?;
-                Some(DataType::Array(Box::new(st), *width_left))
+                Some(Array(Box::new(st), *width_left))
+            }
+            (List(inner), other) | (other, List(inner)) if options.implode_list => {
+                let st = get_supertype(inner, other)?;
+                Some(List(Box::new(st)))
             }
             #[cfg(feature = "dtype-array")]
             (Array(inner_left, _), Array(inner_right, _)) => {
                 let st = get_supertype(inner_left, inner_right)?;
-                Some(DataType::List(Box::new(st)))
+                Some(List(Box::new(st)))
             }
             #[cfg(feature = "dtype-struct")]
             (Struct(inner), right @ Unknown(UnknownKind::Float | UnknownKind::Int(_))) => {
@@ -264,31 +276,47 @@ pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
             },
             (dt, Unknown(kind)) => {
                 match kind {
+                    // numeric vs float|str -> always float|str
                     UnknownKind::Float | UnknownKind::Int(_) if dt.is_float() | dt.is_string() => Some(dt.clone()),
-                    UnknownKind::Float if dt.is_numeric() => Some(Unknown(UnknownKind::Float)),
+                    UnknownKind::Float if dt.is_integer() => Some(Unknown(UnknownKind::Float)),
+                    // Materialize float
+                    UnknownKind::Float if dt.is_float() => Some(dt.clone()),
+                    // Materialize str
                     UnknownKind::Str if dt.is_string() | dt.is_enum() => Some(dt.clone()),
+                    // Materialize str
                     #[cfg(feature = "dtype-categorical")]
                     UnknownKind::Str if dt.is_categorical()  => {
                         let Categorical(_, ord) = dt else { unreachable!()};
                         Some(Categorical(None, *ord))
                     },
+                    // Keep unknown
                     dynam if dt.is_null() => Some(Unknown(*dynam)),
+                    // Find integers sizes
                     UnknownKind::Int(v) if dt.is_numeric() => {
-                        let smallest_fitting_dtype = if dt.is_unsigned_integer() && v.is_positive() {
-                            materialize_dyn_int_pos(*v).dtype()
-                        } else {
-                            materialize_smallest_dyn_int(*v).dtype()
-                        };
-                        match dt {
-                            UInt64 if smallest_fitting_dtype.is_signed_integer() => {
-                                // Ensure we don't cast to float when dealing with dynamic literals
-                                Some(Int64)
-                            },
-                            _ => {
-                                get_supertype(dt, &smallest_fitting_dtype)
+                        // Both dyn int
+                        if let Unknown(UnknownKind::Int(v_other)) = dt {
+                            // Take the maximum value to ensure we bubble up the required minimal size.
+                            Some(Unknown(UnknownKind::Int(std::cmp::max(*v, *v_other))))
+                        }
+                        // dyn int vs number
+                        else {
+                            let smallest_fitting_dtype = if dt.is_unsigned_integer() && !v.is_negative() {
+                                materialize_dyn_int_pos(*v).dtype()
+                            } else {
+                                materialize_smallest_dyn_int(*v).dtype()
+                            };
+                            match dt {
+                                UInt64 if smallest_fitting_dtype.is_signed_integer() => {
+                                    // Ensure we don't cast to float when dealing with dynamic literals
+                                    Some(Int64)
+                                },
+                                _ => {
+                                    get_supertype(dt, &smallest_fitting_dtype)
+                                }
                             }
                         }
                     }
+                    UnknownKind::Int(_) if dt.is_decimal() => Some(dt.clone()),
                     _ => Some(Unknown(UnknownKind::Any))
                 }
             },
@@ -317,7 +345,7 @@ pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
         }
     }
 
-    inner(l, r).or_else(|| inner(r, l))
+    inner(l, r, options).or_else(|| inner(r, l, options))
 }
 
 /// Given multiple data types, determine the data type that all types can safely be cast to.

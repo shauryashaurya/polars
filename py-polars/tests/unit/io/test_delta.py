@@ -24,7 +24,7 @@ def test_scan_delta(delta_table_path: Path) -> None:
     ldf = pl.scan_delta(str(delta_table_path), version=0)
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"], "age": [14, 32]})
-    assert_frame_equal(expected, ldf.collect(), check_dtype=False)
+    assert_frame_equal(expected, ldf.collect(), check_dtypes=False)
 
 
 def test_scan_delta_version(delta_table_path: Path) -> None:
@@ -66,7 +66,7 @@ def test_scan_delta_columns(delta_table_path: Path) -> None:
     ldf = pl.scan_delta(str(delta_table_path), version=0).select("name")
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"]})
-    assert_frame_equal(expected, ldf.collect(), check_dtype=False)
+    assert_frame_equal(expected, ldf.collect(), check_dtypes=False)
 
 
 def test_scan_delta_filesystem(delta_table_path: Path) -> None:
@@ -78,7 +78,7 @@ def test_scan_delta_filesystem(delta_table_path: Path) -> None:
     )
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"], "age": [14, 32]})
-    assert_frame_equal(expected, ldf.collect(), check_dtype=False)
+    assert_frame_equal(expected, ldf.collect(), check_dtypes=False)
 
 
 def test_scan_delta_relative(delta_table_path: Path) -> None:
@@ -87,7 +87,7 @@ def test_scan_delta_relative(delta_table_path: Path) -> None:
     ldf = pl.scan_delta(rel_delta_table_path, version=0)
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"], "age": [14, 32]})
-    assert_frame_equal(expected, ldf.collect(), check_dtype=False)
+    assert_frame_equal(expected, ldf.collect(), check_dtypes=False)
 
     ldf = pl.scan_delta(rel_delta_table_path, version=1)
     assert_frame_not_equal(expected, ldf.collect())
@@ -97,7 +97,7 @@ def test_read_delta(delta_table_path: Path) -> None:
     df = pl.read_delta(str(delta_table_path), version=0)
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"], "age": [14, 32]})
-    assert_frame_equal(expected, df, check_dtype=False)
+    assert_frame_equal(expected, df, check_dtypes=False)
 
 
 def test_read_delta_version(delta_table_path: Path) -> None:
@@ -139,7 +139,7 @@ def test_read_delta_columns(delta_table_path: Path) -> None:
     df = pl.read_delta(str(delta_table_path), version=0, columns=["name"])
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"]})
-    assert_frame_equal(expected, df, check_dtype=False)
+    assert_frame_equal(expected, df, check_dtypes=False)
 
 
 def test_read_delta_filesystem(delta_table_path: Path) -> None:
@@ -151,7 +151,7 @@ def test_read_delta_filesystem(delta_table_path: Path) -> None:
     )
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"], "age": [14, 32]})
-    assert_frame_equal(expected, df, check_dtype=False)
+    assert_frame_equal(expected, df, check_dtypes=False)
 
 
 def test_read_delta_relative(delta_table_path: Path) -> None:
@@ -160,7 +160,7 @@ def test_read_delta_relative(delta_table_path: Path) -> None:
     df = pl.read_delta(rel_delta_table_path, version=0)
 
     expected = pl.DataFrame({"name": ["Joey", "Ivan"], "age": [14, 32]})
-    assert_frame_equal(expected, df, check_dtype=False)
+    assert_frame_equal(expected, df, check_dtypes=False)
 
 
 @pytest.mark.write_disk()
@@ -269,10 +269,8 @@ def test_write_delta_overwrite_schema_deprecated(
             dtype=pl.List(pl.List(pl.List(pl.List(pl.UInt16)))),
         ),
         pl.Series(
-            "date_ns",
-            [datetime(2010, 1, 1, 0, 0)],
-            dtype=pl.Datetime(time_unit="ns", time_zone="Australia/Lord_Howe"),
-        ),
+            "date_ns", [datetime(2010, 1, 1, 0, 0)], dtype=pl.Datetime(time_unit="ns")
+        ).dt.replace_time_zone("Australia/Lord_Howe"),
         pl.Series(
             "date_us",
             [datetime(2010, 1, 1, 0, 0)],
@@ -484,3 +482,38 @@ def test_write_delta_with_merge(tmp_path: Path) -> None:
 
     expected = df.filter(pl.col("a") <= 2)
     assert_frame_equal(result, expected, check_row_order=False)
+
+
+@pytest.mark.write_disk()
+def test_unsupported_dtypes(tmp_path: Path) -> None:
+    df = pl.DataFrame({"a": [None]}, schema={"a": pl.Null})
+    with pytest.raises(TypeError, match="unsupported data type"):
+        df.write_delta(tmp_path / "null")
+
+    df = pl.DataFrame({"a": [123]}, schema={"a": pl.Time})
+    with pytest.raises(TypeError, match="unsupported data type"):
+        df.write_delta(tmp_path / "time")
+
+
+@pytest.mark.write_disk()
+def test_categorical_becomes_string(tmp_path: Path) -> None:
+    df = pl.DataFrame({"a": ["A", "B", "A"]}, schema={"a": pl.Categorical})
+    df.write_delta(tmp_path)
+    df2 = pl.read_delta(str(tmp_path))
+    assert_frame_equal(df2, pl.DataFrame({"a": ["A", "B", "A"]}, schema={"a": pl.Utf8}))
+
+
+@pytest.mark.write_disk()
+@pytest.mark.parametrize("rechunk_and_expected_chunks", [(True, 1), (False, 3)])
+def test_read_parquet_respects_rechunk_16982(
+    rechunk_and_expected_chunks: tuple[bool, int], tmp_path: Path
+) -> None:
+    # Create a delta lake table with 3 chunks:
+    df = pl.DataFrame({"a": [1]})
+    df.write_delta(str(tmp_path))
+    df.write_delta(str(tmp_path), mode="append")
+    df.write_delta(str(tmp_path), mode="append")
+
+    rechunk, expected_chunks = rechunk_and_expected_chunks
+    result = pl.read_delta(str(tmp_path), rechunk=rechunk)
+    assert result.n_chunks() == expected_chunks

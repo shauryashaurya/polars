@@ -7,7 +7,7 @@ mod single_keys_outer;
 mod single_keys_semi_anti;
 pub(super) mod sort_merge;
 use arrow::array::ArrayRef;
-use polars_core::utils::{_set_partition_size, split_ca};
+use polars_core::utils::_set_partition_size;
 use polars_core::POOL;
 use polars_utils::index::ChunkId;
 pub(super) use single_keys::*;
@@ -237,12 +237,12 @@ pub trait JoinDispatch: IntoDf {
         #[cfg(feature = "dtype-categorical")]
         _check_categorical_src(s_left.dtype(), s_right.dtype())?;
 
-        let idx = s_left.hash_join_semi_anti(s_right, anti, join_nulls);
+        let idx = s_left.hash_join_semi_anti(s_right, anti, join_nulls)?;
         // SAFETY:
         // indices are in bounds
         Ok(unsafe { ca_self._finish_anti_semi_join(&idx, slice) })
     }
-    fn _outer_join_from_series(
+    fn _full_join_from_series(
         &self,
         other: &DataFrame,
         s_left: &Series,
@@ -271,10 +271,10 @@ pub trait JoinDispatch: IntoDf {
             || unsafe { other.take_unchecked(&idx_ca_r) },
         );
 
-        let coalesce = args.coalesce.coalesce(&JoinType::Outer);
+        let coalesce = args.coalesce.coalesce(&JoinType::Full);
         let out = _finish_join(df_left, df_right, args.suffix.as_deref());
         if coalesce {
-            Ok(_coalesce_outer_join(
+            Ok(_coalesce_full_join(
                 out?,
                 &[s_left.name()],
                 &[s_right.name()],

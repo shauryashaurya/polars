@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from polars.convert import from_arrow
-from polars.datatypes import Categorical, Null, Time
+from polars.datatypes import Null, Time
 from polars.datatypes.convert import unpack_dtypes
 from polars.dependencies import _DELTALAKE_AVAILABLE, deltalake
 from polars.io.pyarrow_dataset import scan_pyarrow_dataset
@@ -20,6 +20,7 @@ def read_delta(
     *,
     version: int | str | datetime | None = None,
     columns: list[str] | None = None,
+    rechunk: bool = False,
     storage_options: dict[str, Any] | None = None,
     delta_table_options: dict[str, Any] | None = None,
     pyarrow_options: dict[str, Any] | None = None,
@@ -41,6 +42,9 @@ def read_delta(
         table is read.
     columns
         Columns to select. Accepts a list of column names.
+    rechunk
+        Make sure that all columns are contiguous in memory by
+        aggregating the chunks into a single array.
     storage_options
         Extra options for the storage backends supported by `deltalake`.
         For cloud storages, this may include configurations for authentication etc.
@@ -143,7 +147,9 @@ def read_delta(
         delta_table_options=delta_table_options,
     )
 
-    return from_arrow(dl_tbl.to_pyarrow_table(columns=columns, **pyarrow_options))  # type: ignore[return-value]
+    return from_arrow(
+        dl_tbl.to_pyarrow_table(columns=columns, **pyarrow_options), rechunk=rechunk
+    )  # type: ignore[return-value]
 
 
 def scan_delta(
@@ -337,7 +343,10 @@ def _check_if_delta_available() -> None:
 
 def _check_for_unsupported_types(dtypes: list[DataType]) -> None:
     schema_dtypes = unpack_dtypes(*dtypes)
-    unsupported_types = {Time, Categorical, Null}
+    unsupported_types = {Time, Null}
+    # Note that this overlap check does NOT work correctly for Categorical, so
+    # if Categorical is added back to unsupported_types a different check will
+    # need to be used.
     overlap = schema_dtypes & unsupported_types
 
     if overlap:

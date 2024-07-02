@@ -15,6 +15,7 @@ pub mod hashing;
 pub mod idx_vec;
 pub mod mem;
 pub mod min_max;
+pub mod priority;
 pub mod slice;
 pub mod sort;
 pub mod sync;
@@ -26,6 +27,7 @@ pub mod unwrap;
 pub use functions::*;
 
 pub mod aliases;
+pub mod fixedringbuffer;
 pub mod fmt;
 pub mod iter;
 pub mod macros;
@@ -41,4 +43,4 @@ pub mod ord;
 pub mod partitioned;
 
 pub use index::{IdxSize, NullableIdxSize};
-pub use io::open_file;
+pub use io::*;

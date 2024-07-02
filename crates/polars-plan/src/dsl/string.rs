@@ -33,10 +33,12 @@ impl StringNameSpace {
     }
 
     /// Uses aho-corasick to find many patterns.
+    ///
     /// # Arguments
     /// - `patterns`: an expression that evaluates to an String column
     /// - `ascii_case_insensitive`: Enable ASCII-aware case insensitive matching.
-    ///  When this option is enabled, searching will be performed without respect to case for ASCII letters (a-z and A-Z) only.
+    ///   When this option is enabled, searching will be performed without respect to case for
+    ///   ASCII letters (a-z and A-Z) only.
     #[cfg(feature = "find_many")]
     pub fn contains_any(self, patterns: Expr, ascii_case_insensitive: bool) -> Expr {
         self.0.map_many_private(
@@ -51,10 +53,11 @@ impl StringNameSpace {
 
     /// Uses aho-corasick to replace many patterns.
     /// # Arguments
-    /// - `patterns`: an expression that evaluates to an String column
-    /// - `replace_with`: an expression that evaluates to an String column
-    /// - `ascii_case_insensitive`: Enable ASCII-aware case insensitive matching.
-    ///  When this option is enabled, searching will be performed without respect to case for ASCII letters (a-z and A-Z) only.
+    /// - `patterns`: an expression that evaluates to a String column
+    /// - `replace_with`: an expression that evaluates to a String column
+    /// - `ascii_case_insensitive`: Enable ASCII-aware case-insensitive matching.
+    ///   When this option is enabled, searching will be performed without respect to case for
+    ///   ASCII letters (a-z and A-Z) only.
     #[cfg(feature = "find_many")]
     pub fn replace_many(
         self,
@@ -67,6 +70,31 @@ impl StringNameSpace {
                 ascii_case_insensitive,
             }),
             &[patterns, replace_with],
+            false,
+            false,
+        )
+    }
+
+    /// Uses aho-corasick to replace many patterns.
+    /// # Arguments
+    /// - `patterns`: an expression that evaluates to a String column
+    /// - `ascii_case_insensitive`: Enable ASCII-aware case-insensitive matching.
+    ///   When this option is enabled, searching will be performed without respect to case for
+    ///   ASCII letters (a-z and A-Z) only.
+    /// - `overlapping`: Whether matches may overlap.
+    #[cfg(feature = "find_many")]
+    pub fn extract_many(
+        self,
+        patterns: Expr,
+        ascii_case_insensitive: bool,
+        overlapping: bool,
+    ) -> Expr {
+        self.0.map_many_private(
+            FunctionExpr::StringExpr(StringFunction::ExtractMany {
+                ascii_case_insensitive,
+                overlapping,
+            }),
+            &[patterns],
             false,
             false,
         )
@@ -269,11 +297,7 @@ impl StringNameSpace {
         let time_unit = match (&options.format, time_unit) {
             (_, Some(time_unit)) => time_unit,
             (Some(format), None) => {
-                if format.contains("%.9f")
-                    || format.contains("%9f")
-                    || format.contains("%f")
-                    || format.contains("%.f")
-                {
+                if format.contains("%.9f") || format.contains("%9f") {
                     TimeUnit::Nanoseconds
                 } else if format.contains("%.3f") || format.contains("%3f") {
                     TimeUnit::Milliseconds
@@ -305,7 +329,7 @@ impl StringNameSpace {
     ///
     /// * `delimiter` - A string that will act as delimiter between values.
     #[cfg(feature = "concat_str")]
-    pub fn concat(self, delimiter: &str, ignore_nulls: bool) -> Expr {
+    pub fn join(self, delimiter: &str, ignore_nulls: bool) -> Expr {
         self.0
             .apply_private(
                 StringFunction::ConcatVertical {
@@ -545,11 +569,6 @@ impl StringNameSpace {
             false,
             false,
         )
-    }
-
-    pub fn explode(self) -> Expr {
-        self.0
-            .apply_private(FunctionExpr::StringExpr(StringFunction::Explode))
     }
 
     #[cfg(feature = "extract_jsonpath")]

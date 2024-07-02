@@ -7,11 +7,11 @@ use crate::PyExpr;
 
 #[pymethods]
 impl PyExpr {
-    fn str_concat(&self, delimiter: &str, ignore_nulls: bool) -> Self {
+    fn str_join(&self, delimiter: &str, ignore_nulls: bool) -> Self {
         self.inner
             .clone()
             .str()
-            .concat(delimiter, ignore_nulls)
+            .join(delimiter, ignore_nulls)
             .into()
     }
 
@@ -108,10 +108,6 @@ impl PyExpr {
 
     fn str_tail(&self, n: Self) -> Self {
         self.inner.clone().str().tail(n.inner).into()
-    }
-
-    fn str_explode(&self) -> Self {
-        self.inner.clone().str().explode().into()
     }
 
     fn str_to_uppercase(&self) -> Self {
@@ -319,6 +315,20 @@ impl PyExpr {
             .clone()
             .str()
             .replace_many(patterns.inner, replace_with.inner, ascii_case_insensitive)
+            .into()
+    }
+
+    #[cfg(feature = "find_many")]
+    fn str_extract_many(
+        &self,
+        patterns: PyExpr,
+        ascii_case_insensitive: bool,
+        overlapping: bool,
+    ) -> Self {
+        self.inner
+            .clone()
+            .str()
+            .extract_many(patterns.inner, ascii_case_insensitive, overlapping)
             .into()
     }
 }

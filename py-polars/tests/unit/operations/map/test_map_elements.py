@@ -151,7 +151,7 @@ def test_map_elements_type_propagation() -> None:
         .group_by("a", maintain_order=True)
         .agg(
             [
-                pl.when(pl.col("b").null_count() == 0)
+                pl.when(~pl.col("b").has_nulls())
                 .then(
                     pl.col("b").map_elements(
                         lambda s: s[0]["c"],
@@ -201,19 +201,17 @@ def test_map_elements_object_dtypes() -> None:
         assert pl.DataFrame(
             {"a": pl.Series([1, 2, "a", 4, 5], dtype=pl.Object)}
         ).with_columns(
-            [
-                pl.col("a").map_elements(lambda x: x * 2, return_dtype=pl.Object),
-                pl.col("a")
-                .map_elements(
-                    lambda x: isinstance(x, (int, float)), return_dtype=pl.Boolean
-                )
-                .alias("is_numeric1"),
-                pl.col("a")
-                .map_elements(
-                    lambda x: isinstance(x, (int, float)), return_dtype=pl.Boolean
-                )
-                .alias("is_numeric_infer"),
-            ]
+            pl.col("a").map_elements(lambda x: x * 2, return_dtype=pl.Object),
+            pl.col("a")
+            .map_elements(
+                lambda x: isinstance(x, (int, float)), return_dtype=pl.Boolean
+            )
+            .alias("is_numeric1"),
+            pl.col("a")
+            .map_elements(
+                lambda x: isinstance(x, (int, float)), return_dtype=pl.Boolean
+            )
+            .alias("is_numeric_infer"),
         ).to_dict(as_series=False) == {
             "a": [2, 4, "aa", 8, 10],
             "is_numeric1": [True, True, False, True, True],
@@ -223,11 +221,9 @@ def test_map_elements_object_dtypes() -> None:
 
 def test_map_elements_explicit_list_output_type() -> None:
     out = pl.DataFrame({"str": ["a", "b"]}).with_columns(
-        [
-            pl.col("str").map_elements(
-                lambda _: pl.Series([1, 2, 3]), return_dtype=pl.List(pl.Int64)
-            )
-        ]
+        pl.col("str").map_elements(
+            lambda _: pl.Series([1, 2, 3]), return_dtype=pl.List(pl.Int64)
+        )
     )
 
     assert out.dtypes == [pl.List(pl.Int64)]
@@ -342,16 +338,29 @@ def test_map_elements_chunked_14390() -> None:
         )
 
 
-def test_apply_deprecated() -> None:
-    with pytest.deprecated_call():
-        pl.col("a").apply(np.abs)
-    with pytest.deprecated_call():
-        pl.Series([1, 2, 3]).apply(np.abs, return_dtype=pl.Float64)
-
-
 def test_cabbage_strategy_14396() -> None:
     df = pl.DataFrame({"x": [1, 2, 3]})
     with pytest.raises(
         ValueError, match="strategy 'cabbage' is not supported"
     ), pytest.warns(PolarsInefficientMapWarning):
         df.select(pl.col("x").map_elements(lambda x: 2 * x, strategy="cabbage"))  # type: ignore[arg-type]
+
+
+def test_unknown_map_elements() -> None:
+    df = pl.DataFrame(
+        {
+            "Amount": [10, 1, 1, 5],
+            "Flour": ["1000g", "100g", "50g", "75g"],
+        }
+    )
+
+    q = df.lazy().select(
+        pl.col("Amount"),
+        pl.col("Flour").map_elements(lambda x: 100.0) / pl.col("Amount"),
+    )
+
+    assert q.collect().to_dict(as_series=False) == {
+        "Amount": [10, 1, 1, 5],
+        "Flour": [10.0, 100.0, 100.0, 20.0],
+    }
+    assert q.collect_schema().dtypes() == [pl.Int64, pl.Unknown]

@@ -6,9 +6,9 @@ use super::nested::*;
 use super::util;
 use crate::array::*;
 use crate::datatypes::*;
-use crate::record_batch::RecordBatch;
+use crate::record_batch::RecordBatchT;
 use crate::types::months_days_ns;
-use crate::with_match_primitive_type;
+use crate::with_match_primitive_type_full;
 
 fn make_mutable(
     data_type: &ArrowDataType,
@@ -19,7 +19,7 @@ fn make_mutable(
         PhysicalType::Boolean => {
             Box::new(MutableBooleanArray::with_capacity(capacity)) as Box<dyn MutableArray>
         },
-        PhysicalType::Primitive(primitive) => with_match_primitive_type!(primitive, |$T| {
+        PhysicalType::Primitive(primitive) => with_match_primitive_type_full!(primitive, |$T| {
             Box::new(MutablePrimitiveArray::<$T>::with_capacity(capacity).to(data_type.clone()))
                 as Box<dyn MutableArray>
         }),
@@ -461,7 +461,7 @@ fn skip_item<'a>(
     Ok(block)
 }
 
-/// Deserializes a [`Block`] assumed to be encoded according to [`AvroField`] into [`RecordBatch`],
+/// Deserializes a [`Block`] assumed to be encoded according to [`AvroField`] into [`RecordBatchT`],
 /// using `projection` to ignore `avro_fields`.
 /// # Panics
 /// `fields`, `avro_fields` and `projection` must have the same length.
@@ -470,7 +470,7 @@ pub fn deserialize(
     fields: &[Field],
     avro_fields: &[AvroField],
     projection: &[bool],
-) -> PolarsResult<RecordBatch<Box<dyn Array>>> {
+) -> PolarsResult<RecordBatchT<Box<dyn Array>>> {
     assert_eq!(fields.len(), avro_fields.len());
     assert_eq!(fields.len(), projection.len());
 
@@ -508,7 +508,7 @@ pub fn deserialize(
             }?
         }
     }
-    RecordBatch::try_new(
+    RecordBatchT::try_new(
         arrays
             .iter_mut()
             .zip(projection.iter())

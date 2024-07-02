@@ -30,13 +30,20 @@ def test_scan_slice_streaming(io_files_path: Path) -> None:
     df = pl.scan_csv(foods_file_path).head(5).collect(streaming=True)
     assert df.shape == (5, 4)
 
+    # globbing
+    foods_file_path = io_files_path / "foods*.csv"
+    df = pl.scan_csv(foods_file_path).head(5).collect(streaming=True)
+    assert df.shape == (5, 4)
+
 
 @pytest.mark.parametrize("dtype", [pl.Int8, pl.UInt8, pl.Int16, pl.UInt16])
 def test_scan_csv_overwrite_small_dtypes(
     io_files_path: Path, dtype: pl.DataType
 ) -> None:
     file_path = io_files_path / "foods1.csv"
-    df = pl.scan_csv(file_path, dtypes={"sugars_g": dtype}).collect(streaming=True)
+    df = pl.scan_csv(file_path, schema_overrides={"sugars_g": dtype}).collect(
+        streaming=True
+    )
     assert df.dtypes == [pl.String, pl.Int64, pl.Float64, dtype]
 
 
@@ -141,6 +148,7 @@ def test_sink_csv_with_options() -> None:
             datetime_format="%Y",
             date_format="%d",
             time_format="%H",
+            float_scientific=True,
             float_precision=42,
             null_value="BOOM",
             quote_style="always",
@@ -158,6 +166,7 @@ def test_sink_csv_with_options() -> None:
             datetime_format="%Y",
             date_format="%d",
             time_format="%H",
+            float_scientific=True,
             float_precision=42,
             null_value="BOOM",
             quote_style="always",
@@ -183,6 +192,14 @@ def test_sink_csv_batch_size_zero() -> None:
     lf = pl.LazyFrame({"a": [1, 2, 3], "b": [1, 2, 3]})
     with pytest.raises(ValueError, match="invalid zero value"):
         lf.sink_csv("test.csv", batch_size=0)
+
+
+def test_sink_csv_nested_data() -> None:
+    lf = pl.LazyFrame({"list": [[1, 2, 3, 4, 5]]})
+    with pytest.raises(
+        pl.exceptions.ComputeError, match="CSV format does not support nested data"
+    ):
+        lf.sink_csv("path")
 
 
 def test_scan_csv_only_header_10792(io_files_path: Path) -> None:
@@ -263,3 +280,13 @@ def test_parquet_eq_statistics(monkeypatch: Any, capfd: Any, tmp_path: Path) -> 
             "parquet file can be skipped, the statistics were sufficient"
             " to apply the predicate." in captured
         )
+
+
+@pytest.mark.write_disk()
+def test_streaming_empty_parquet_16523(tmp_path: Path) -> None:
+    file_path = tmp_path / "foo.parquet"
+    df = pl.DataFrame({"a": []}, schema={"a": pl.Int32})
+    df.write_parquet(file_path)
+    q = pl.scan_parquet(file_path)
+    q2 = pl.LazyFrame({"a": [1]}, schema={"a": pl.Int32})
+    assert q.join(q2, on="a").collect(streaming=True).shape == (0, 1)

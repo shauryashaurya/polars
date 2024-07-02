@@ -34,6 +34,8 @@ use smartstring::alias::String as SmartString;
 #[cfg(feature = "cloud")]
 use url::Url;
 
+#[cfg(feature = "file_cache")]
+use crate::file_cache::get_env_file_cache_ttl;
 #[cfg(feature = "aws")]
 use crate::pl_async::with_concurrency_budget;
 #[cfg(feature = "aws")]
@@ -56,19 +58,23 @@ type Configs<T> = Vec<(T, String)>;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 /// Options to connect to various cloud providers.
 pub struct CloudOptions {
+    pub max_retries: usize,
+    #[cfg(feature = "file_cache")]
+    pub file_cache_ttl: u64,
     #[cfg(feature = "aws")]
     aws: Option<Configs<AmazonS3ConfigKey>>,
     #[cfg(feature = "azure")]
     azure: Option<Configs<AzureConfigKey>>,
     #[cfg(feature = "gcp")]
     gcp: Option<Configs<GoogleConfigKey>>,
-    pub max_retries: usize,
 }
 
 impl Default for CloudOptions {
     fn default() -> Self {
         Self {
             max_retries: 2,
+            #[cfg(feature = "file_cache")]
+            file_cache_ttl: get_env_file_cache_ttl(),
             #[cfg(feature = "aws")]
             aws: Default::default(),
             #[cfg(feature = "azure")]
@@ -125,6 +131,16 @@ impl CloudType {
 #[cfg(feature = "cloud")]
 pub(crate) fn parse_url(input: &str) -> std::result::Result<url::Url, url::ParseError> {
     Ok(if input.contains("://") {
+        let input = if input.starts_with("https://") {
+            std::borrow::Cow::Borrowed(input)
+        } else {
+            // Some paths may contain '%', we need to double-encode as it doesn't seem
+            // possible to construct `Url` without having it decode the path.
+            // TODO: Maybe we can avoid using `Url`.
+            const PERC: percent_encoding::AsciiSet = percent_encoding::CONTROLS.add(b'%');
+            std::borrow::Cow::<str>::from(percent_encoding::percent_encode(input.as_bytes(), &PERC))
+        };
+        let input = input.as_ref();
         url::Url::parse(input)?
     } else {
         let path = std::path::Path::new(input);
@@ -188,7 +204,7 @@ fn read_config(
             continue;
         }
 
-        let mut config = std::fs::File::open(&resolve_homedir(path)).ok()?;
+        let mut config = std::fs::File::open(resolve_homedir(path)).ok()?;
         let mut buf = vec![];
         config.read_to_end(&mut buf).ok()?;
         let content = std::str::from_utf8(buf.as_ref()).ok()?;

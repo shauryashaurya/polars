@@ -268,6 +268,7 @@ _MODULE_FUNC_TO_EXPR_NAME = {
     "json.loads": "str.json_decode",
 }
 _RE_IMPLICIT_BOOL = re.compile(r'pl\.col\("([^"]*)"\) & pl\.col\("\1"\)\.(.+)')
+_RE_STRIP_BOOL = re.compile(r"^bool\((.+)\)$")
 
 
 def _get_all_caller_variables() -> dict[str, Any]:
@@ -600,7 +601,7 @@ class InstructionTranslator:
         elif inst.opname in OpNames.UNARY:
             return OpNames.UNARY[inst.opname]
         elif inst.opname == "BINARY_SUBSCR":
-            return "replace"
+            return "replace_strict"
         else:
             msg = (
                 "unrecognized opname"
@@ -613,7 +614,7 @@ class InstructionTranslator:
     def _expr(self, value: StackEntry, col: str, param_name: str, depth: int) -> str:
         """Take stack entry value and convert to polars expression string."""
         if isinstance(value, StackValue):
-            op = value.operator
+            op = _RE_STRIP_BOOL.sub(r"\1", value.operator)
             e1 = self._expr(value.left_operand, col, param_name, depth + 1)
             if value.operator_arity == 1:
                 if op not in OpNames.UNARY_VALUES:
@@ -653,7 +654,7 @@ class InstructionTranslator:
                         if " " in e1
                         else f"{not_}{e1}.is_in({e2})"
                     )
-                elif op == "replace":
+                elif op == "replace_strict":
                     if not self._caller_variables:
                         self._caller_variables = _get_all_caller_variables()
                     if not isinstance(self._caller_variables.get(e1, None), dict):
@@ -735,6 +736,7 @@ class RewrittenInstructions:
             "PUSH_NULL",
             "RESUME",
             "RETURN_VALUE",
+            "TO_BOOL",
         ]
     )
 

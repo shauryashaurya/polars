@@ -53,8 +53,7 @@ where
     match source {
         DataFrameScan {
             df,
-            projection,
-            selection,
+            filter: selection,
             output_schema,
             ..
         } => {
@@ -67,8 +66,9 @@ where
                     operator_objects.push(op)
                 }
                 // projection is free
-                if let Some(projection) = projection {
-                    df = df.select(projection.as_slice())?;
+                if let Some(schema) = output_schema {
+                    let columns = schema.iter_names().cloned().collect::<Vec<_>>();
+                    df = df._select_impl_unchecked(&columns)?;
                 }
             }
             Ok(Box::new(sources::DataFrameSource::from_df(df)) as Box<dyn Source>)
@@ -76,6 +76,7 @@ where
         Scan {
             paths,
             file_info,
+            hive_parts,
             file_options,
             predicate,
             output_schema,
@@ -99,14 +100,11 @@ where
             }
             match scan_type {
                 #[cfg(feature = "csv")]
-                FileScan::Csv {
-                    options: csv_options,
-                } => {
-                    assert_eq!(paths.len(), 1);
+                FileScan::Csv { options, .. } => {
                     let src = sources::CsvSource::new(
-                        paths[0].clone(),
+                        paths,
                         file_info.schema,
-                        csv_options,
+                        options,
                         file_options,
                         verbose,
                     )?;
@@ -147,6 +145,7 @@ where
                         metadata,
                         file_options,
                         file_info,
+                        hive_parts,
                         verbose,
                         predicate,
                     )?;
@@ -302,7 +301,7 @@ where
                                 placeholder,
                             )) as Box<dyn SinkTrait>
                         },
-                        JoinType::Outer { .. } => {
+                        JoinType::Full { .. } => {
                             // First get the names before we (potentially) swap.
                             let key_names_left = join_columns_left
                                 .iter()
@@ -337,6 +336,13 @@ where
             let input_schema = lp_arena.get(*input).schema(lp_arena);
             let slice = SliceSink::new(*offset as u64, *len as usize, input_schema.into_owned());
             Box::new(slice) as Box<dyn SinkTrait>
+        },
+        Reduce {
+            input: _,
+            exprs: _,
+            schema: _,
+        } => {
+            todo!()
         },
         Sort {
             input,
@@ -415,10 +421,10 @@ where
                                 let col = expr_arena.add(AExpr::Column(name.clone()));
                                 let node = match options.keep_strategy {
                                     UniqueKeepStrategy::First | UniqueKeepStrategy::Any => {
-                                        expr_arena.add(AExpr::Agg(AAggExpr::First(col)))
+                                        expr_arena.add(AExpr::Agg(IRAggExpr::First(col)))
                                     },
                                     UniqueKeepStrategy::Last => {
-                                        expr_arena.add(AExpr::Agg(AAggExpr::Last(col)))
+                                        expr_arena.add(AExpr::Agg(IRAggExpr::Last(col)))
                                     },
                                     UniqueKeepStrategy::None => {
                                         unreachable!()
@@ -553,8 +559,7 @@ fn get_hstack<F>(
     expr_arena: &Arena<AExpr>,
     to_physical: &F,
     input_schema: SchemaRef,
-    cse_exprs: Option<Box<HstackOperator>>,
-    unchecked: bool,
+    options: ProjectionOptions,
 ) -> PolarsResult<HstackOperator>
 where
     F: Fn(&ExprIR, &Arena<AExpr>, Option<&SchemaRef>) -> PolarsResult<Arc<dyn PhysicalPipedExpr>>,
@@ -562,8 +567,7 @@ where
     Ok(operators::HstackOperator {
         exprs: exprs_to_physical(exprs, expr_arena, &to_physical, Some(&input_schema))?,
         input_schema,
-        cse_exprs,
-        unchecked,
+        options,
     })
 }
 
@@ -584,57 +588,33 @@ where
             let op = operators::SimpleProjectionOperator::new(columns, input_schema.into_owned());
             Box::new(op) as Box<dyn Operator>
         },
-        Select { expr, input, .. } => {
+        Select {
+            expr,
+            input,
+            options,
+            ..
+        } => {
             let input_schema = lp_arena.get(*input).schema(lp_arena);
-
-            let cse_exprs = expr.cse_exprs();
-            let cse_exprs = if cse_exprs.is_empty() {
-                None
-            } else {
-                Some(get_hstack(
-                    cse_exprs,
-                    expr_arena,
-                    to_physical,
-                    (*input_schema).clone(),
-                    None,
-                    true,
-                )?)
-            };
-
             let op = operators::ProjectionOperator {
-                exprs: exprs_to_physical(
-                    expr.default_exprs(),
-                    expr_arena,
-                    &to_physical,
-                    Some(&input_schema),
-                )?,
-                cse_exprs,
+                exprs: exprs_to_physical(expr, expr_arena, &to_physical, Some(&input_schema))?,
+                options: *options,
             };
             Box::new(op) as Box<dyn Operator>
         },
-        HStack { exprs, input, .. } => {
+        HStack {
+            exprs,
+            input,
+            options,
+            ..
+        } => {
             let input_schema = lp_arena.get(*input).schema(lp_arena);
 
-            let cse_exprs = exprs.cse_exprs();
-            let cse_exprs = if cse_exprs.is_empty() {
-                None
-            } else {
-                Some(Box::new(get_hstack(
-                    cse_exprs,
-                    expr_arena,
-                    to_physical,
-                    (*input_schema).clone(),
-                    None,
-                    true,
-                )?))
-            };
             let op = get_hstack(
-                exprs.default_exprs(),
+                exprs,
                 expr_arena,
                 to_physical,
                 (*input_schema).clone(),
-                cse_exprs,
-                false,
+                *options,
             )?;
 
             Box::new(op) as Box<dyn Operator>

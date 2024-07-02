@@ -1,7 +1,5 @@
 //! Implementations of upstream traits for [`ChunkedArray<T>`]
 use std::borrow::{Borrow, Cow};
-#[cfg(feature = "object")]
-use std::marker::PhantomData;
 
 #[cfg(feature = "object")]
 use arrow::bitmap::{Bitmap, MutableBitmap};
@@ -251,9 +249,6 @@ impl<T: PolarsObject> FromIterator<Option<T>> for ObjectChunked<T> {
         let size = iter.size_hint().0;
         let mut null_mask_builder = MutableBitmap::with_capacity(size);
 
-        // TODO: Clippy lint is broken, remove attr once fixed.
-        // https://github.com/rust-lang/rust-clippy/issues/12580
-        #[cfg_attr(feature = "nightly", allow(clippy::manual_unwrap_or_default))]
         let values: Vec<T> = iter
             .map(|value| match value {
                 Some(value) => {
@@ -278,15 +273,9 @@ impl<T: PolarsObject> FromIterator<Option<T>> for ObjectChunked<T> {
             offset: 0,
             len,
         });
-        let mut out = ChunkedArray {
-            field: Arc::new(Field::new("", get_object_type::<T>())),
-            chunks: vec![arr],
-            phantom: PhantomData,
-            bit_settings: Default::default(),
-            length: 0,
-            null_count: 0,
-        };
-        out.compute_len();
-        out
+        ChunkedArray::new_with_compute_len(
+            Arc::new(Field::new("", get_object_type::<T>())),
+            vec![arr],
+        )
     }
 }

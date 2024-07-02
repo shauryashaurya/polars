@@ -13,6 +13,7 @@ pub mod filter;
 pub mod float_sum;
 pub mod if_then_else;
 pub mod min_max;
+pub mod unique;
 
 pub mod arity;
 

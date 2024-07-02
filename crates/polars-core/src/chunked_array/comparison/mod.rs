@@ -9,7 +9,7 @@ use arrow::array::BooleanArray;
 use arrow::bitmap::MutableBitmap;
 use arrow::compute;
 use num_traits::{NumCast, ToPrimitive};
-use polars_compute::comparisons::TotalOrdKernel;
+use polars_compute::comparisons::{TotalEqKernel, TotalOrdKernel};
 
 use crate::prelude::*;
 use crate::series::implementations::null::NullChunked;
@@ -18,7 +18,7 @@ use crate::series::IsSorted;
 impl<T> ChunkCompare<&ChunkedArray<T>> for ChunkedArray<T>
 where
     T: PolarsNumericType,
-    T::Array: TotalOrdKernel<Scalar = T::Native>,
+    T::Array: TotalOrdKernel<Scalar = T::Native> + TotalEqKernel<Scalar = T::Native>,
 {
     type Item = BooleanChunked;
 
@@ -560,34 +560,26 @@ where
     match (lhs.len(), rhs.len()) {
         (_, 1) => {
             let right = rhs.get_as_series(0).map(|s| s.with_name(""));
-            // SAFETY: values within iterator do not outlive the iterator itself
-            unsafe {
-                lhs.amortized_iter()
-                    .map(|left| op(left.as_ref().map(|us| us.as_ref()), right.as_ref()))
-                    .collect_trusted()
-            }
+            lhs.amortized_iter()
+                .map(|left| op(left.as_ref().map(|us| us.as_ref()), right.as_ref()))
+                .collect_trusted()
         },
         (1, _) => {
             let left = lhs.get_as_series(0).map(|s| s.with_name(""));
-            // SAFETY: values within iterator do not outlive the iterator itself
-            unsafe {
-                rhs.amortized_iter()
-                    .map(|right| op(left.as_ref(), right.as_ref().map(|us| us.as_ref())))
-                    .collect_trusted()
-            }
-        },
-        // SAFETY: values within iterator do not outlive the iterator itself
-        _ => unsafe {
-            lhs.amortized_iter()
-                .zip(rhs.amortized_iter())
-                .map(|(left, right)| {
-                    op(
-                        left.as_ref().map(|us| us.as_ref()),
-                        right.as_ref().map(|us| us.as_ref()),
-                    )
-                })
+            rhs.amortized_iter()
+                .map(|right| op(left.as_ref(), right.as_ref().map(|us| us.as_ref())))
                 .collect_trusted()
         },
+        _ => lhs
+            .amortized_iter()
+            .zip(rhs.amortized_iter())
+            .map(|(left, right)| {
+                op(
+                    left.as_ref().map(|us| us.as_ref()),
+                    right.as_ref().map(|us| us.as_ref()),
+                )
+            })
+            .collect_trusted(),
     }
 }
 

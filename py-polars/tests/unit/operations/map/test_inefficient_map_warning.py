@@ -184,11 +184,11 @@ TEST_CASES = [
     # ---------------------------------------------
     # replace
     # ---------------------------------------------
-    ("a", "lambda x: MY_DICT[x]", 'pl.col("a").replace(MY_DICT)'),
+    ("a", "lambda x: MY_DICT[x]", 'pl.col("a").replace_strict(MY_DICT)'),
     (
         "a",
         "lambda x: MY_DICT[x - 1] + MY_DICT[1 + x]",
-        '(pl.col("a") - 1).replace(MY_DICT) + (1 + pl.col("a")).replace(MY_DICT)',
+        '(pl.col("a") - 1).replace_strict(MY_DICT) + (1 + pl.col("a")).replace_strict(MY_DICT)',
     ),
     # ---------------------------------------------
     # standard library datetime parsing
@@ -317,7 +317,7 @@ def test_parse_apply_functions(col: str, func: str, expr_repr: str) -> None:
         assert_frame_equal(
             result_frame,
             expected_frame,
-            check_dtype=(".dt." not in suggested_expression),
+            check_dtypes=(".dt." not in suggested_expression),
         )
 
 
@@ -506,7 +506,7 @@ def test_omit_implicit_bool() -> None:
 
 
 def test_partial_functions_13523() -> None:
-    def plus(value, amount: int):  # type: ignore[no-untyped-def]
+    def plus(value: int, amount: int) -> int:
         return value + amount
 
     data = {"a": [1, 2], "b": [3, 4]}

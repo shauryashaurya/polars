@@ -5,7 +5,7 @@ from collections import OrderedDict
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import pytest
 
@@ -14,9 +14,10 @@ import polars.selectors as cs
 from polars.exceptions import NoDataError, ParameterCollisionError
 from polars.io.spreadsheet.functions import _identify_workbook
 from polars.testing import assert_frame_equal, assert_series_equal
+from tests.unit.conftest import FLOAT_DTYPES, NUMERIC_DTYPES
 
 if TYPE_CHECKING:
-    from polars.type_aliases import ExcelSpreadsheetEngine, SchemaDict, SelectorType
+    from polars._typing import ExcelSpreadsheetEngine, SchemaDict, SelectorType
 
 pytestmark = pytest.mark.slow()
 
@@ -43,6 +44,11 @@ def path_xlsb(io_files_path: Path) -> Path:
 def path_ods(io_files_path: Path) -> Path:
     # open document spreadsheet
     return io_files_path / "example.ods"
+
+
+@pytest.fixture()
+def path_xls_empty(io_files_path: Path) -> Path:
+    return io_files_path / "empty.xls"
 
 
 @pytest.fixture()
@@ -80,15 +86,12 @@ def path_ods_mixed(io_files_path: Path) -> Path:
     [
         # xls file
         (pl.read_excel, "path_xls", {"engine": "calamine"}),
-        (pl.read_excel, "path_xls", {"engine": None}),  # << autodetect
         # xlsx file
         (pl.read_excel, "path_xlsx", {"engine": "xlsx2csv"}),
-        (pl.read_excel, "path_xlsx", {"engine": None}),  # << autodetect
         (pl.read_excel, "path_xlsx", {"engine": "openpyxl"}),
         (pl.read_excel, "path_xlsx", {"engine": "calamine"}),
         # xlsb file (binary)
         (pl.read_excel, "path_xlsb", {"engine": "calamine"}),
-        (pl.read_excel, "path_xlsb", {"engine": "pyxlsb"}),
         # open document
         (pl.read_ods, "path_ods", {}),
     ],
@@ -126,7 +129,6 @@ def test_read_spreadsheet(
         (pl.read_excel, "path_xlsx", {"engine": "calamine"}),
         # xlsb file (binary)
         (pl.read_excel, "path_xlsb", {"engine": "calamine"}),
-        (pl.read_excel, "path_xlsb", {"engine": "pyxlsb"}),
         # open document
         (pl.read_ods, "path_ods", {}),
     ],
@@ -171,7 +173,6 @@ def test_read_excel_multi_sheets(
         (pl.read_excel, "path_xlsx", {"engine": "calamine"}),
         # xlsb file (binary)
         (pl.read_excel, "path_xlsb", {"engine": "calamine"}),
-        (pl.read_excel, "path_xlsb", {"engine": "pyxlsb"}),
         # open document
         (pl.read_ods, "path_ods", {}),
     ],
@@ -278,7 +279,6 @@ def test_read_excel_basic_datatypes(
         (pl.read_excel, "path_xlsx", {"engine": "calamine"}),
         # xlsb file (binary)
         (pl.read_excel, "path_xlsb", {"engine": "calamine"}),
-        (pl.read_excel, "path_xlsb", {"engine": "pyxlsb"}),
         # open document
         (pl.read_ods, "path_ods", {}),
     ],
@@ -308,7 +308,6 @@ def test_read_invalid_worksheet(
     ("read_spreadsheet", "source", "additional_params"),
     [
         (pl.read_excel, "path_xlsx_mixed", {"engine": "openpyxl"}),
-        (pl.read_excel, "path_xlsb_mixed", {"engine": "pyxlsb"}),
         (pl.read_ods, "path_ods_mixed", {}),
     ],
 )
@@ -363,13 +362,18 @@ def test_read_mixed_dtype_columns(
 
 @pytest.mark.parametrize("engine", ["xlsx2csv", "openpyxl", "calamine"])
 def test_write_excel_bytes(engine: ExcelSpreadsheetEngine) -> None:
-    df = pl.DataFrame({"A": [1.5, -2, 0, 3.0, -4.5, 5.0]})
+    df = pl.DataFrame({"colx": [1.5, -2, 0], "coly": ["a", None, "c"]})
 
     excel_bytes = BytesIO()
     df.write_excel(excel_bytes)
 
     df_read = pl.read_excel(excel_bytes, engine=engine)
     assert_frame_equal(df, df_read)
+
+    # also confirm consistent behaviour when 'infer_schema_length=0'
+    df_read = pl.read_excel(excel_bytes, engine=engine, infer_schema_length=0)
+    expected = pl.DataFrame({"colx": ["1.5", "-2", "0"], "coly": ["a", None, "c"]})
+    assert_frame_equal(expected, df_read)
 
 
 def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> None:
@@ -386,7 +390,8 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
     df2 = pl.read_excel(
         path_xlsx,
         sheet_name="test4",
-        read_options={"dtypes": {"cardinality": pl.UInt16}},
+        engine="xlsx2csv",
+        read_options={"schema_overrides": {"cardinality": pl.UInt16}},
     ).drop_nulls()
 
     assert df2.schema["cardinality"] == pl.UInt16
@@ -396,9 +401,10 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
     df3 = pl.read_excel(
         path_xlsx,
         sheet_name="test4",
+        engine="xlsx2csv",
         schema_overrides={"cardinality": pl.UInt16},
         read_options={
-            "dtypes": {
+            "schema_overrides": {
                 "rows_by_key": pl.Float32,
                 "iter_groups": pl.Float32,
             },
@@ -438,8 +444,9 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
         pl.read_excel(
             path_xlsx,
             sheet_name="test4",
+            engine="xlsx2csv",
             schema_overrides={"cardinality": pl.UInt16},
-            read_options={"dtypes": {"cardinality": pl.Int32}},
+            read_options={"schema_overrides": {"cardinality": pl.Int32}},
         )
 
     # read multiple sheets in conjunction with 'schema_overrides'
@@ -467,7 +474,7 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
         ("calamine", "schema_sample_rows"),
     ],
 )
-def test_invalid_parameter_combinations(
+def test_invalid_parameter_combinations_infer_schema_len(
     path_xlsx: Path, engine: str, read_opts_param: str
 ) -> None:
     with pytest.raises(
@@ -483,15 +490,35 @@ def test_invalid_parameter_combinations(
         )
 
 
+@pytest.mark.parametrize(
+    ("engine", "read_opts_param"),
+    [
+        ("xlsx2csv", "columns"),
+        ("calamine", "use_columns"),
+    ],
+)
+def test_invalid_parameter_combinations_columns(
+    path_xlsx: Path, engine: str, read_opts_param: str
+) -> None:
+    with pytest.raises(
+        ParameterCollisionError,
+        match=f"cannot specify both `columns`.*{read_opts_param}",
+    ):
+        pl.read_excel(  # type: ignore[call-overload]
+            path_xlsx,
+            sheet_id=1,
+            engine=engine,
+            read_options={read_opts_param: ["B", "C", "D"]},
+            columns=["A", "B", "C"],
+        )
+
+
 def test_unsupported_engine() -> None:
     with pytest.raises(NotImplementedError):
         pl.read_excel(None, engine="foo")  # type: ignore[call-overload]
 
 
-def test_unsupported_binary_workbook(path_xlsx: Path, path_xlsb: Path) -> None:
-    with pytest.raises(Exception, match="invalid Excel Binary Workbook"):
-        pl.read_excel(path_xlsx, engine="pyxlsb")
-
+def test_unsupported_binary_workbook(path_xlsb: Path) -> None:
     with pytest.raises(Exception, match="does not support binary format"):
         pl.read_excel(path_xlsb, engine="openpyxl")
 
@@ -526,7 +553,7 @@ def test_read_excel_all_sheets_with_sheet_name(path_xlsx: Path, engine: str) -> 
             "column_totals": True,
             "float_precision": 0,
         },
-        # slightly customised formatting, with some formulas
+        # slightly customized formatting, with some formulas
         {
             "position": (0, 0),
             "table_style": {
@@ -555,7 +582,7 @@ def test_read_excel_all_sheets_with_sheet_name(path_xlsx: Path, engine: str) -> 
             "column_totals": True,
             "row_totals": True,
         },
-        # heavily customised formatting/definition
+        # heavily customized formatting/definition
         {
             "position": "A1",
             "table_name": "PolarsFrameData",
@@ -595,7 +622,9 @@ def test_read_excel_all_sheets_with_sheet_name(path_xlsx: Path, engine: str) -> 
                 ],
             },
             "dtype_formats": {
-                pl.FLOAT_DTYPES: '_(£* #,##0.00_);_(£* (#,##0.00);_(£* "-"??_);_(@_)',
+                frozenset(
+                    FLOAT_DTYPES
+                ): '_(£* #,##0.00_);_(£* (#,##0.00);_(£* "-"??_);_(@_)',
                 pl.Date: "dd-mm-yyyy",
             },
             "column_formats": {"dtm": {"font_color": "#31869c", "bg_color": "#b7dee8"}},
@@ -643,8 +672,10 @@ def test_excel_round_trip(write_params: dict[str, Any]) -> None:
             engine=engine,
             read_options=read_options,
         )[:3].select(df.columns[:3])
+
         if engine == "xlsx2csv":
             xldf = xldf.with_columns(pl.col("dtm").str.strptime(pl.Date, fmt_strptime))
+
         assert_frame_equal(df, xldf)
 
 
@@ -690,7 +721,7 @@ def test_excel_sparklines(engine: ExcelSpreadsheetEngine) -> None:
             workbook=wb,
             worksheet="frame_data",
             table_style="Table Style Light 2",
-            dtype_formats={pl.INTEGER_DTYPES: "#,##0_);(#,##0)"},
+            dtype_formats={frozenset(NUMERIC_DTYPES): "#,##0_);(#,##0)"},
             column_formats={cs.starts_with("h"): "#,##0_);(#,##0)"},
             sparklines={
                 "trend": ["q1", "q2", "q3", "q4"],
@@ -814,6 +845,7 @@ def test_excel_freeze_panes() -> None:
     [
         (pl.read_excel, "path_xlsx_empty"),
         (pl.read_excel, "path_xlsb_empty"),
+        (pl.read_excel, "path_xls_empty"),
         (pl.read_ods, "path_ods_empty"),
     ],
 )
@@ -822,17 +854,31 @@ def test_excel_empty_sheet(
     source: str,
     request: pytest.FixtureRequest,
 ) -> None:
-    empty_spreadsheet_path = request.getfixturevalue(source)
-    read_spreadsheet = (
-        pl.read_ods  # type: ignore[assignment]
-        if empty_spreadsheet_path.suffix == ".ods"
-        else pl.read_excel
-    )
+    ods = (empty_spreadsheet_path := request.getfixturevalue(source)).suffix == ".ods"
+    read_spreadsheet = pl.read_ods if ods else pl.read_excel  # type: ignore[assignment]
+
     with pytest.raises(NoDataError, match="empty Excel sheet"):
         read_spreadsheet(empty_spreadsheet_path)
 
-    df = read_spreadsheet(empty_spreadsheet_path, raise_if_empty=False)
-    assert_frame_equal(df, pl.DataFrame())
+    engine_params = [{}] if ods else [{"engine": "calamine"}]
+    for params in engine_params:
+        df = read_spreadsheet(
+            empty_spreadsheet_path,
+            sheet_name="no_data",
+            raise_if_empty=False,
+            **params,
+        )
+        expected = pl.DataFrame()
+        assert_frame_equal(df, expected)
+
+        df = read_spreadsheet(
+            empty_spreadsheet_path,
+            sheet_name="no_rows",
+            raise_if_empty=False,
+            **params,
+        )
+        expected = pl.DataFrame(schema={f"col{c}": pl.String for c in ("x", "y", "z")})
+        assert_frame_equal(df, expected)
 
 
 @pytest.mark.parametrize(
@@ -858,6 +904,15 @@ def test_excel_hidden_columns(
     assert_frame_equal(df, read_df)
 
 
+def test_excel_mixed_calamine_float_data(io_files_path: Path) -> None:
+    df = pl.read_excel(io_files_path / "nan_test.xlsx", engine="calamine")
+    nan = float("nan")
+    assert_frame_equal(
+        pl.DataFrame({"float_col": [nan, nan, nan, 100.0, 200.0, 300.0]}),
+        df,
+    )
+
+
 @pytest.mark.parametrize("engine", ["xlsx2csv", "openpyxl", "calamine"])
 def test_excel_type_inference_with_nulls(engine: ExcelSpreadsheetEngine) -> None:
     df = pl.DataFrame(
@@ -877,15 +932,22 @@ def test_excel_type_inference_with_nulls(engine: ExcelSpreadsheetEngine) -> None
     xls = BytesIO()
     df.write_excel(xls)
 
-    read_df = pl.read_excel(
-        xls,
-        engine=engine,
-        schema_overrides={
-            "e": pl.Date,
-            "f": pl.Datetime("us"),
-        },
-    )
-    assert_frame_equal(df, read_df)
+    reversed_cols = list(reversed(df.columns))
+    read_cols: Sequence[str] | Sequence[int]
+    for read_cols in (  # type: ignore[assignment]
+        reversed_cols,
+        [5, 4, 3, 2, 1, 0],
+    ):
+        read_df = pl.read_excel(
+            xls,
+            engine=engine,
+            columns=read_cols,
+            schema_overrides={
+                "e": pl.Date,
+                "f": pl.Datetime("us"),
+            },
+        )
+        assert_frame_equal(df.select(reversed_cols), read_df)
 
 
 @pytest.mark.parametrize(
@@ -911,11 +973,16 @@ def test_identify_workbook(
     # identify from IO[bytes]
     with Path.open(spreadsheet_path, "rb") as f:
         assert _identify_workbook(f) == file_type
+        assert isinstance(pl.read_excel(f, engine="calamine"), pl.DataFrame)
 
     # identify from bytes
     with Path.open(spreadsheet_path, "rb") as f:
-        assert _identify_workbook(f.read()) == file_type
+        raw_data = f.read()
+        assert _identify_workbook(raw_data) == file_type
+        assert isinstance(pl.read_excel(raw_data, engine="calamine"), pl.DataFrame)
 
     # identify from BytesIO
     with Path.open(spreadsheet_path, "rb") as f:
-        assert _identify_workbook(BytesIO(f.read())) == file_type
+        bytesio_data = BytesIO(f.read())
+        assert _identify_workbook(bytesio_data) == file_type
+        assert isinstance(pl.read_excel(bytesio_data, engine="calamine"), pl.DataFrame)

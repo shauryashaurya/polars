@@ -10,7 +10,8 @@ description = "Code examples included in the Polars documentation website"
 
 [dependencies]
 aws-config = { version = "1" }
-aws-sdk-s3 = { version = "1" }
+aws-sdk-s3 = { version = "=1.31" } # Exact version because of https://github.com/smithy-lang/smithy-rs/issues/3672
+aws-smithy-checksums = { version = "=0.60.8" } # Exact version because of https://github.com/smithy-lang/smithy-rs/issues/3672
 chrono = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
@@ -131,8 +132,8 @@ name = "user-guide-transformations-joins"
 path = "user-guide/transformations/joins.rs"
 required-features = ["polars/lazy"]
 [[bin]]
-name = "user-guide-transformations-melt"
-path = "user-guide/transformations/melt.rs"
+name = "user-guide-transformations-unpivot"
+path = "user-guide/transformations/unpivot.rs"
 [[bin]]
 name = "user-guide-transformations-pivot"
 path = "user-guide/transformations/pivot.rs"

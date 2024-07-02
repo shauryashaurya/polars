@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from io import IOBase
 
     from polars import DataFrame, LazyFrame
-    from polars.type_aliases import SchemaDefinition
+    from polars._typing import SchemaDefinition
 
 
 def read_ndjson(
@@ -143,6 +143,9 @@ def scan_ndjson(
     else:
         sources = [normalize_filepath(source) for source in source]
         source = None  # type: ignore[assignment]
+    if infer_schema_length == 0:
+        msg = "'infer_schema_length' should be positive"
+        raise ValueError(msg)
 
     pylf = PyLazyFrame.new_from_ndjson(
         source,

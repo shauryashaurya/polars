@@ -113,6 +113,63 @@ impl NumOpsDispatchInner for BooleanType {
     }
 }
 
+#[cfg(feature = "dtype-array")]
+fn array_shape(dt: &DataType, infer: bool) -> Vec<i64> {
+    fn inner(dt: &DataType, buf: &mut Vec<i64>) {
+        if let DataType::Array(_, size) = dt {
+            buf.push(*size as i64)
+        }
+    }
+
+    let mut buf = vec![];
+    if infer {
+        buf.push(-1)
+    }
+    inner(dt, &mut buf);
+    buf
+}
+
+#[cfg(feature = "dtype-array")]
+impl ArrayChunked {
+    fn arithm_helper(
+        &self,
+        rhs: &Series,
+        op: &dyn Fn(Series, Series) -> PolarsResult<Series>,
+    ) -> PolarsResult<Series> {
+        let l_leaf_array = self.clone().into_series().get_leaf_array();
+        let shape = array_shape(self.dtype(), true);
+
+        let r_leaf_array = if rhs.dtype().is_numeric() && rhs.len() == 1 {
+            rhs.clone()
+        } else {
+            polars_ensure!(self.dtype() == rhs.dtype(), InvalidOperation: "can only do arithmetic of array's of the same type and shape; got {} and {}", self.dtype(), rhs.dtype());
+            rhs.get_leaf_array()
+        };
+
+        let out = op(l_leaf_array, r_leaf_array)?;
+        out.reshape_array(&shape)
+    }
+}
+
+#[cfg(feature = "dtype-array")]
+impl NumOpsDispatchInner for FixedSizeListType {
+    fn add_to(lhs: &ArrayChunked, rhs: &Series) -> PolarsResult<Series> {
+        lhs.arithm_helper(rhs, &|l, r| l.add_to(&r))
+    }
+    fn subtract(lhs: &ArrayChunked, rhs: &Series) -> PolarsResult<Series> {
+        lhs.arithm_helper(rhs, &|l, r| l.subtract(&r))
+    }
+    fn multiply(lhs: &ArrayChunked, rhs: &Series) -> PolarsResult<Series> {
+        lhs.arithm_helper(rhs, &|l, r| l.multiply(&r))
+    }
+    fn divide(lhs: &ArrayChunked, rhs: &Series) -> PolarsResult<Series> {
+        lhs.arithm_helper(rhs, &|l, r| l.divide(&r))
+    }
+    fn remainder(lhs: &ArrayChunked, rhs: &Series) -> PolarsResult<Series> {
+        lhs.arithm_helper(rhs, &|l, r| l.remainder(&r))
+    }
+}
+
 #[cfg(feature = "checked_arithmetic")]
 pub mod checked {
     use num_traits::{CheckedDiv, One, ToPrimitive, Zero};
@@ -381,11 +438,11 @@ fn coerce_time_units<'a>(
 }
 
 #[cfg(feature = "dtype-struct")]
-pub fn _struct_arithmetic<F: FnMut(&Series, &Series) -> Series>(
+pub fn _struct_arithmetic<F: FnMut(&Series, &Series) -> PolarsResult<Series>>(
     s: &Series,
     rhs: &Series,
     mut func: F,
-) -> Series {
+) -> PolarsResult<Series> {
     let s = s.struct_().unwrap();
     let rhs = rhs.struct_().unwrap();
     let s_fields = s.fields();
@@ -394,47 +451,46 @@ pub fn _struct_arithmetic<F: FnMut(&Series, &Series) -> Series>(
     match (s_fields.len(), rhs_fields.len()) {
         (_, 1) => {
             let rhs = &rhs.fields()[0];
-            s._apply_fields(|s| func(s, rhs)).into_series()
+            Ok(s.try_apply_fields(|s| func(s, rhs))?.into_series())
         },
         (1, _) => {
             let s = &s.fields()[0];
-            rhs._apply_fields(|rhs| func(s, rhs)).into_series()
+            Ok(rhs.try_apply_fields(|rhs| func(s, rhs))?.into_series())
         },
         _ => {
             let mut rhs_iter = rhs.fields().iter();
 
-            s._apply_fields(|s| match rhs_iter.next() {
+            Ok(s.try_apply_fields(|s| match rhs_iter.next() {
                 Some(rhs) => func(s, rhs),
-                None => s.clone(),
-            })
-            .into_series()
+                None => Ok(s.clone()),
+            })?
+            .into_series())
         },
     }
 }
 
-impl Sub for &Series {
-    type Output = Series;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        match (self.dtype(), rhs.dtype()) {
-            #[cfg(feature = "dtype-struct")]
-            (DataType::Struct(_), DataType::Struct(_)) => {
-                _struct_arithmetic(self, rhs, |a, b| a.sub(b))
-            },
-            _ => {
-                let (lhs, rhs) = coerce_lhs_rhs(self, rhs).expect("cannot coerce datatypes");
-                lhs.subtract(rhs.as_ref()).expect("data types don't match")
-            },
-        }
+fn check_lengths(a: &Series, b: &Series) -> PolarsResult<()> {
+    match (a.len(), b.len()) {
+        // broadcasting
+        (1, _) | (_, 1) => Ok(()),
+        // equal
+        (a, b) if a == b => Ok(()),
+        // unequal
+        (a, b) => {
+            polars_bail!(InvalidOperation: "cannot do arithmetic operation on series of different lengths: got {} and {}", a, b)
+        },
     }
 }
 
-impl Series {
-    pub fn try_add(&self, rhs: &Series) -> PolarsResult<Series> {
+impl Add for &Series {
+    type Output = PolarsResult<Series>;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        check_lengths(self, rhs)?;
         match (self.dtype(), rhs.dtype()) {
             #[cfg(feature = "dtype-struct")]
             (DataType::Struct(_), DataType::Struct(_)) => {
-                Ok(_struct_arithmetic(self, rhs, |a, b| a.add(b)))
+                _struct_arithmetic(self, rhs, |a, b| a.add(b))
             },
             _ => {
                 let (lhs, rhs) = coerce_lhs_rhs(self, rhs)?;
@@ -443,75 +499,111 @@ impl Series {
         }
     }
 }
-impl Add for &Series {
-    type Output = Series;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        self.try_add(rhs).unwrap()
+impl Sub for &Series {
+    type Output = PolarsResult<Series>;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        check_lengths(self, rhs)?;
+        match (self.dtype(), rhs.dtype()) {
+            #[cfg(feature = "dtype-struct")]
+            (DataType::Struct(_), DataType::Struct(_)) => {
+                _struct_arithmetic(self, rhs, |a, b| a.sub(b))
+            },
+            _ => {
+                let (lhs, rhs) = coerce_lhs_rhs(self, rhs)?;
+                lhs.subtract(rhs.as_ref())
+            },
+        }
     }
 }
 
 impl Mul for &Series {
-    type Output = Series;
+    type Output = PolarsResult<Series>;
 
     /// ```
     /// # use polars_core::prelude::*;
     /// let s: Series = [1, 2, 3].iter().collect();
-    /// let out = &s * &s;
+    /// let out = (&s * &s).unwrap();
     /// ```
     fn mul(self, rhs: Self) -> Self::Output {
+        check_lengths(self, rhs)?;
+
+        use DataType::*;
         match (self.dtype(), rhs.dtype()) {
             #[cfg(feature = "dtype-struct")]
-            (DataType::Struct(_), DataType::Struct(_)) => {
-                _struct_arithmetic(self, rhs, |a, b| a.mul(b))
+            (Struct(_), Struct(_)) => _struct_arithmetic(self, rhs, |a, b| a.mul(b)),
+            // temporal lh
+            (Duration(_), _) | (Date, _) | (Datetime(_, _), _) | (Time, _) => self.multiply(rhs),
+            // temporal rhs
+            (_, Date) | (_, Datetime(_, _)) | (_, Time) => {
+                polars_bail!(opq = mul, self.dtype(), rhs.dtype())
+            },
+            (_, Duration(_)) => {
+                // swap order
+                let out = rhs.multiply(self)?;
+                Ok(out.with_name(self.name()))
             },
             _ => {
-                let (lhs, rhs) = coerce_lhs_rhs(self, rhs).expect("cannot coerce datatypes");
-                lhs.multiply(rhs.as_ref()).expect("data types don't match")
+                let (lhs, rhs) = coerce_lhs_rhs(self, rhs)?;
+                lhs.multiply(rhs.as_ref())
             },
         }
     }
 }
 
 impl Div for &Series {
-    type Output = Series;
+    type Output = PolarsResult<Series>;
 
     /// ```
     /// # use polars_core::prelude::*;
     /// let s: Series = [1, 2, 3].iter().collect();
-    /// let out = &s / &s;
+    /// let out = (&s / &s).unwrap();
     /// ```
     fn div(self, rhs: Self) -> Self::Output {
+        check_lengths(self, rhs)?;
+        use DataType::*;
         match (self.dtype(), rhs.dtype()) {
             #[cfg(feature = "dtype-struct")]
-            (DataType::Struct(_), DataType::Struct(_)) => {
+            (Struct(_), Struct(_)) => {
                 _struct_arithmetic(self, rhs, |a, b| a.div(b))
             },
+            (Duration(_), _) => self.divide(rhs),
+            | (Date, _)
+            | (Datetime(_, _), _)
+            | (Time, _)
+            // temporal rhs
+            | (_ , Duration(_))
+            | (_ , Time)
+            | (_ , Date)
+            | (_ , Datetime(_, _))
+            => polars_bail!(opq = div, self.dtype(), rhs.dtype()),
             _ => {
-                let (lhs, rhs) = coerce_lhs_rhs(self, rhs).expect("cannot coerce datatypes");
-                lhs.divide(rhs.as_ref()).expect("data types don't match")
+                let (lhs, rhs) = coerce_lhs_rhs(self, rhs)?;
+                lhs.divide(rhs.as_ref())
             },
         }
     }
 }
 
 impl Rem for &Series {
-    type Output = Series;
+    type Output = PolarsResult<Series>;
 
     /// ```
     /// # use polars_core::prelude::*;
     /// let s: Series = [1, 2, 3].iter().collect();
-    /// let out = &s / &s;
+    /// let out = (&s / &s).unwrap();
     /// ```
     fn rem(self, rhs: Self) -> Self::Output {
+        check_lengths(self, rhs)?;
         match (self.dtype(), rhs.dtype()) {
             #[cfg(feature = "dtype-struct")]
             (DataType::Struct(_), DataType::Struct(_)) => {
                 _struct_arithmetic(self, rhs, |a, b| a.rem(b))
             },
             _ => {
-                let (lhs, rhs) = coerce_lhs_rhs(self, rhs).expect("cannot coerce datatypes");
-                lhs.remainder(rhs.as_ref()).expect("data types don't match")
+                let (lhs, rhs) = coerce_lhs_rhs(self, rhs)?;
+                lhs.remainder(rhs.as_ref())
             },
         }
     }
@@ -792,23 +884,23 @@ mod test {
 
     #[test]
     #[allow(clippy::eq_op)]
-    fn test_arithmetic_series() {
+    fn test_arithmetic_series() -> PolarsResult<()> {
         // Series +-/* Series
         let s = Series::new("foo", [1, 2, 3]);
         assert_eq!(
-            Vec::from((&s * &s).i32().unwrap()),
+            Vec::from((&s * &s)?.i32().unwrap()),
             [Some(1), Some(4), Some(9)]
         );
         assert_eq!(
-            Vec::from((&s / &s).i32().unwrap()),
+            Vec::from((&s / &s)?.i32().unwrap()),
             [Some(1), Some(1), Some(1)]
         );
         assert_eq!(
-            Vec::from((&s - &s).i32().unwrap()),
+            Vec::from((&s - &s)?.i32().unwrap()),
             [Some(0), Some(0), Some(0)]
         );
         assert_eq!(
-            Vec::from((&s + &s).i32().unwrap()),
+            Vec::from((&s + &s)?.i32().unwrap()),
             [Some(2), Some(4), Some(6)]
         );
         // Series +-/* Number
@@ -851,9 +943,11 @@ mod test {
             [Some(0), Some(1), Some(1)]
         );
 
-        assert_eq!((&s * &s).name(), "foo");
+        assert_eq!((&s * &s)?.name(), "foo");
         assert_eq!((&s * 1).name(), "foo");
         assert_eq!((1.div(&s)).name(), "foo");
+
+        Ok(())
     }
 
     #[test]

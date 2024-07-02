@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::new_empty_array;
-use polars_core::frame::ArrowChunk;
-use polars_core::prelude::{ArrowSchema, DataFrame, IdxSize, Series};
-use polars_error::PolarsResult;
+use arrow::record_batch::RecordBatch;
+use polars_core::prelude::*;
 
 use crate::options::RowIndex;
 #[cfg(any(feature = "ipc", feature = "avro", feature = "ipc_streaming",))]
@@ -48,7 +47,7 @@ pub trait WriterFactory {
 }
 
 pub trait ArrowReader {
-    fn next_record_batch(&mut self) -> PolarsResult<Option<ArrowChunk>>;
+    fn next_record_batch(&mut self) -> PolarsResult<Option<RecordBatch>>;
 }
 
 #[cfg(any(feature = "ipc", feature = "avro", feature = "ipc_streaming",))]
@@ -60,7 +59,7 @@ pub(crate) fn finish_reader<R: ArrowReader>(
     arrow_schema: &ArrowSchema,
     row_index: Option<RowIndex>,
 ) -> PolarsResult<DataFrame> {
-    use polars_core::utils::accumulate_dataframes_vertical;
+    use polars_core::utils::accumulate_dataframes_vertical_unchecked;
 
     let mut num_rows = 0;
     let mut parsed_dfs = Vec::with_capacity(1024);
@@ -96,7 +95,7 @@ pub(crate) fn finish_reader<R: ArrowReader>(
         parsed_dfs.push(df);
     }
 
-    let df = {
+    let mut df = {
         if parsed_dfs.is_empty() {
             // Create an empty dataframe with the correct data types
             let empty_cols = arrow_schema
@@ -109,9 +108,25 @@ pub(crate) fn finish_reader<R: ArrowReader>(
             DataFrame::new(empty_cols)?
         } else {
             // If there are any rows, accumulate them into a df
-            accumulate_dataframes_vertical(parsed_dfs)?
+            accumulate_dataframes_vertical_unchecked(parsed_dfs)
         }
     };
 
-    Ok(if rechunk { df.agg_chunks() } else { df })
+    if rechunk {
+        df.as_single_chunk_par();
+    }
+    Ok(df)
+}
+
+pub(crate) fn schema_to_arrow_checked(
+    schema: &Schema,
+    pl_flavor: bool,
+    _file_name: &str,
+) -> PolarsResult<ArrowSchema> {
+    let fields = schema.iter_fields().map(|field| {
+        #[cfg(feature = "object")]
+        polars_ensure!(!matches!(field.data_type(), DataType::Object(_, _)), ComputeError: "cannot write 'Object' datatype to {}", _file_name);
+        Ok(field.data_type().to_arrow_field(field.name().as_str(), pl_flavor))
+    }).collect::<PolarsResult<Vec<_>>>()?;
+    Ok(ArrowSchema::from(fields))
 }

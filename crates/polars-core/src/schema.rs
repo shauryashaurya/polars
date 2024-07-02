@@ -81,6 +81,11 @@ impl Schema {
         Self { inner: map }
     }
 
+    /// Reserve `additional` memory spaces in the schema.
+    pub fn reserve(&mut self, additional: usize) {
+        self.inner.reserve(additional);
+    }
+
     /// The number of fields in the schema
     #[inline]
     pub fn len(&self) -> usize {
@@ -349,6 +354,21 @@ impl Schema {
         self.inner.extend(other.inner)
     }
 
+    /// Merge borrowed `other` into `self`
+    ///
+    /// Merging logic:
+    /// - Fields that occur in `self` but not `other` are unmodified
+    /// - Fields that occur in `other` but not `self` are appended, in order, to the end of `self`
+    /// - Fields that occur in both `self` and `other` are updated with the dtype from `other`, but keep their original
+    ///   index
+    pub fn merge_from_ref(&mut self, other: &Self) {
+        self.inner.extend(
+            other
+                .iter()
+                .map(|(column, datatype)| (column.clone(), datatype.clone())),
+        )
+    }
+
     /// Convert self to `ArrowSchema` by cloning the fields
     pub fn to_arrow(&self, pl_flavor: bool) -> ArrowSchema {
         let fields: Vec<_> = self
@@ -426,6 +446,9 @@ pub trait IndexOfSchema: Debug {
     /// Get a vector of all column names.
     fn get_names(&self) -> Vec<&str>;
 
+    /// Get a vector of (name, dtype) pairs
+    fn get_names_and_dtypes(&'_ self) -> Vec<(&'_ str, DataType)>;
+
     fn try_index_of(&self, name: &str) -> PolarsResult<usize> {
         self.index_of(name).ok_or_else(|| {
             polars_err!(
@@ -444,6 +467,13 @@ impl IndexOfSchema for Schema {
     fn get_names(&self) -> Vec<&str> {
         self.iter_names().map(|name| name.as_str()).collect()
     }
+
+    fn get_names_and_dtypes(&'_ self) -> Vec<(&'_ str, DataType)> {
+        self.inner
+            .iter()
+            .map(|(name, dtype)| (name.as_str(), dtype.clone()))
+            .collect()
+    }
 }
 
 impl IndexOfSchema for ArrowSchema {
@@ -453,6 +483,45 @@ impl IndexOfSchema for ArrowSchema {
 
     fn get_names(&self) -> Vec<&str> {
         self.fields.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    fn get_names_and_dtypes(&'_ self) -> Vec<(&'_ str, DataType)> {
+        self.fields
+            .iter()
+            .map(|x| (x.name.as_str(), DataType::from_arrow(&x.data_type, true)))
+            .collect()
+    }
+}
+
+pub trait SchemaNamesAndDtypes {
+    const IS_ARROW: bool;
+    type DataType: Debug + PartialEq;
+
+    /// Get a vector of (name, dtype) pairs
+    fn get_names_and_dtypes(&'_ self) -> Vec<(&'_ str, Self::DataType)>;
+}
+
+impl SchemaNamesAndDtypes for Schema {
+    const IS_ARROW: bool = false;
+    type DataType = DataType;
+
+    fn get_names_and_dtypes(&'_ self) -> Vec<(&'_ str, Self::DataType)> {
+        self.inner
+            .iter()
+            .map(|(name, dtype)| (name.as_str(), dtype.clone()))
+            .collect()
+    }
+}
+
+impl SchemaNamesAndDtypes for ArrowSchema {
+    const IS_ARROW: bool = true;
+    type DataType = ArrowDataType;
+
+    fn get_names_and_dtypes(&'_ self) -> Vec<(&'_ str, Self::DataType)> {
+        self.fields
+            .iter()
+            .map(|x| (x.name.as_str(), x.data_type.clone()))
+            .collect()
     }
 }
 
@@ -477,4 +546,52 @@ impl From<&ArrowSchemaRef> for Schema {
     fn from(value: &ArrowSchemaRef) -> Self {
         Self::from(value.as_ref())
     }
+}
+
+pub fn ensure_matching_schema<S: SchemaNamesAndDtypes>(lhs: &S, rhs: &S) -> PolarsResult<()> {
+    let lhs = lhs.get_names_and_dtypes();
+    let rhs = rhs.get_names_and_dtypes();
+
+    if lhs.len() != rhs.len() {
+        polars_bail!(
+            SchemaMismatch:
+            "schemas contained differing number of columns: {} != {}",
+            lhs.len(), rhs.len(),
+        );
+    }
+
+    for (i, ((l_name, l_dtype), (r_name, r_dtype))) in lhs.iter().zip(&rhs).enumerate() {
+        if l_name != r_name {
+            polars_bail!(
+                SchemaMismatch:
+                "schema names differ at index {}: {} != {}",
+                i, l_name, r_name
+            )
+        }
+        if l_dtype != r_dtype
+            && (!S::IS_ARROW
+                || unsafe {
+                    // For timezone normalization. Easier than writing out the entire PartialEq.
+                    DataType::from_arrow(
+                        std::mem::transmute::<&<S as SchemaNamesAndDtypes>::DataType, &ArrowDataType>(
+                            l_dtype,
+                        ),
+                        true,
+                    ) != DataType::from_arrow(
+                        std::mem::transmute::<&<S as SchemaNamesAndDtypes>::DataType, &ArrowDataType>(
+                            r_dtype,
+                        ),
+                        true,
+                    )
+                })
+        {
+            polars_bail!(
+                SchemaMismatch:
+                "schema dtypes differ at index {} for column {}: {:?} != {:?}",
+                i, l_name, l_dtype, r_dtype
+            )
+        }
+    }
+
+    Ok(())
 }
