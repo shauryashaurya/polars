@@ -98,6 +98,7 @@ from polars.dependencies import numpy as np
 from polars.dependencies import pandas as pd
 from polars.dependencies import pyarrow as pa
 from polars.exceptions import ComputeError, ModuleUpgradeRequiredError, ShapeError
+from polars.interchange.protocol import CompatLevel
 from polars.series.array import ArrayNameSpace
 from polars.series.binary import BinaryNameSpace
 from polars.series.categorical import CatNameSpace
@@ -501,6 +502,15 @@ class Series:
         if validity is not None:
             validity = validity._s
         return cls._from_pyseries(PySeries._from_buffers(dtype, data, validity))
+
+    @staticmethod
+    def _newest_compat_level() -> int:
+        """
+        Get the newest supported compat level.
+
+        This is for pyo3-polars.
+        """
+        return CompatLevel._newest()._version  # type: ignore[attr-defined]
 
     @property
     def dtype(self) -> DataType:
@@ -4342,11 +4352,18 @@ class Series:
         # tensor.rename(self.name)
         return tensor
 
-    def to_arrow(self) -> pa.Array:
+    @deprecate_renamed_parameter("future", "compat_level", version="1.1")
+    def to_arrow(self, *, compat_level: CompatLevel | None = None) -> pa.Array:
         """
         Return the underlying Arrow array.
 
         If the Series contains only a single chunk this operation is zero copy.
+
+        Parameters
+        ----------
+        compat_level
+            Use a specific compatibility level
+            when exporting Polars' internal data structures.
 
         Examples
         --------
@@ -4360,7 +4377,11 @@ class Series:
           3
         ]
         """
-        return self._s.to_arrow()
+        if compat_level is None:
+            compat_level = False  # type: ignore[assignment]
+        elif isinstance(compat_level, CompatLevel):
+            compat_level = compat_level._version  # type: ignore[attr-defined]
+        return self._s.to_arrow(compat_level)
 
     def to_pandas(
         self, *, use_pyarrow_extension_array: bool = False, **kwargs: Any
